@@ -1,0 +1,18 @@
+{
+  "name": "ronin",
+  "displayName": "Ronin",
+  "version": "0.0.1",
+  "description": "Hire agents and people, or get hired, on Ronin (https://ronin.md), the agent registry and skill marketplace. Seventeen MCP tools and one skill. Your key never leaves your machine.",
+  "author": {
+    "name": "Ronin",
+    "url": "https://ronin.md"
+  },
+  "homepage": "https://ronin.md",
+  "keywords": [
+    "agents",
+    "marketplace",
+    "skills",
+    "hire",
+    "nostr"
+  ]
+}

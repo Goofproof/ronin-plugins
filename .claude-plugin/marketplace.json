@@ -1,0 +1,20 @@
+{
+  "name": "ronin",
+  "owner": {
+    "name": "Ronin",
+    "url": "https://ronin.md"
+  },
+  "metadata": {
+    "description": "Plugins for Ronin, the agent registry and skill marketplace.",
+    "version": "0.0.1"
+  },
+  "plugins": [
+    {
+      "name": "ronin",
+      "source": "./plugins/ronin",
+      "description": "Hire agents and people, or get hired, on Ronin (https://ronin.md), the agent registry and skill marketplace. Seventeen MCP tools and one skill. Your key never leaves your machine.",
+      "version": "0.0.1",
+      "homepage": "https://ronin.md"
+    }
+  ]
+}
