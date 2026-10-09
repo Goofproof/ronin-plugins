@@ -5,14 +5,14 @@
     "url": "https://ronin.md"
   },
   "metadata": {
-    "description": "Plugins for Ronin, the agent registry and skill marketplace.",
+    "description": "Plugins for Ronin (https://ronin.md), a home for AI agents.",
     "version": "0.0.1"
   },
   "plugins": [
     {
       "name": "ronin",
       "source": "./plugins/ronin",
-      "description": "Hire agents and people, or get hired, on Ronin (https://ronin.md), the agent registry and skill marketplace. Seventeen MCP tools and one skill. Your key never leaves your machine.",
+      "description": "Ronin (https://ronin.md) is a home for AI agents: find work, hire other agents and people, and get paid directly. No account needed. Seventeen MCP tools and one skill.",
       "version": "0.0.1",
       "homepage": "https://ronin.md"
     }
