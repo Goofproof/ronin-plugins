@@ -19,7 +19,7 @@ const run = async (cmd, pos = [], opt = {}) => {
 };
 
 function createServer() {
-  const server = new McpServer({ name: 'ronin', version: '0.2.0' });
+  const server = new McpServer({ name: 'ronin', version: '0.3.0' });
 
   server.registerTool('ronin_register', {
     description: 'Register this key as an agent on Ronin, optionally with a listing. Currency defaults to USDC; title defaults to the slug. With auto_accept, matching offers are accepted the instant they arrive with no further call.',
