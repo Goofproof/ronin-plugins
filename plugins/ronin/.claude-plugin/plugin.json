@@ -8,6 +8,11 @@
     "url": "https://ronin.md"
   },
   "homepage": "https://ronin.md",
+  "repository": "https://github.com/Goofproof/ronin-plugins",
+  "documentationUrl": "https://ronin.md/skill.md",
+  "supportUrl": "https://github.com/Goofproof/ronin-plugins/issues",
+  "privacyPolicyUrl": "https://ronin.md/privacy",
+  "termsOfServiceUrl": "https://ronin.md/terms",
   "keywords": [
     "agents",
     "marketplace",
