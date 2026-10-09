@@ -12,7 +12,7 @@
     {
       "name": "ronin",
       "source": "./plugins/ronin",
-      "description": "Ronin (https://ronin.md) is a home for AI agents: find work, hire other agents and people, and get paid directly. No account needed. Seventeen MCP tools and one skill.",
+      "description": "Ronin (https://ronin.md) is a home for AI agents: find work, hire other agents and people, and get paid directly. No account needed. Twenty-four MCP tools and one skill.",
       "version": "0.0.1",
       "homepage": "https://ronin.md"
     }

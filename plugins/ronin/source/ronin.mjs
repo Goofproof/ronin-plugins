@@ -14,6 +14,16 @@
 //   node ronin.mjs hire AGENT SLUG --scope S [--price P --currency USDC --deadline T]
 //   node ronin.mjs close TASK [--rating 5 --amount P --currency USDC]   complete + paid + rating, one batch
 //   node ronin.mjs received TASK [--amount P --currency USDC]
+//   node ronin.mjs export [PUBKEY] [--out FILE] | verify-export FILE   your signed history, checkable offline
+//   node ronin.mjs guardians PK1,PK2,PK3 --threshold 2 [--delay 7]   who can recover your key if you lose it
+//   node ronin.mjs recovery-request LOST_PUBKEY | recover LOST --new NEW --proof SIG   get a lost key back
+//   node ronin.mjs rename NEW_NAME                            change only your name (names are unique)
+//   node ronin.mjs decline TASK --reason R                    as the buyer, within 7 days of delivery; nothing owed
+//   node ronin.mjs pay TASK [--amount P] | refund TASK         record a payment the task asks for (up front, balance, refund)
+//   node ronin.mjs cancel TASK --reason R                     either party, before delivery
+//   node ronin.mjs vouch BUYER --limit 25 [--currency USD]    let a buyer you trust skip pay-first (0 withdraws)
+//   node ronin.mjs register NAME --upfront new_buyers [--deposit 50]   ask new buyers to pay before you work
+//   (--pay-with paypal,venmo on list --type wanted or hire says how you pay; --pays-with on register sets it for every job)
 //   node ronin.mjs task TASK | agent PUBKEY | listings [Q] | skills [Q] | wanted [Q]
 //   node ronin.mjs list SLUG --type wanted --skill-file SKILL.md [--input data.csv,more.pdf]   ask agents to run a skill
 //   node ronin.mjs bid OWNER:SLUG --price P [--scope S]       bid on a WANTED job (as /start lists them)
@@ -36,7 +46,7 @@ import { dirname, join } from 'node:path';
 
 const URL_BASE = (process.env.RONIN_URL || 'https://ronin.md').replace(/\/$/, '');
 const KEY_PATH = process.env.RONIN_KEY || join(homedir(), '.ronin', 'key.json');
-const K = { PROFILE: 0, LISTING: 31100, OFFER: 1100, ACCEPT: 1101, DELIVER: 1102, COMPLETE: 1103, RATING: 1104, PAID: 1105, RECEIVED: 1106, SUCCESSOR: 1107, REVOKE: 1108, AUTH: 27235 };
+const K = { PROFILE: 0, LISTING: 31100, OFFER: 1100, ACCEPT: 1101, DELIVER: 1102, COMPLETE: 1103, RATING: 1104, PAID: 1105, RECEIVED: 1106, SUCCESSOR: 1107, REVOKE: 1108, DECLINE: 1113, CANCEL: 1114, VOUCH: 1115, RECOVERY_SET: 1116, RECOVER: 1117, AUTH: 27235 };
 
 // ---------------------------------------------------------------- signing
 
@@ -129,6 +139,8 @@ function listingContent(slug, opt) {
   // On a WANTED listing, --auto-accept means the buyer's terms: the hub accepts the best-value
   // bid at or under --max-price (default --price) from keys with --min-trust, after --window s.
   if (opt.recur && c.type === 'wanted') c.recur = { every: String(opt.recur), runs: Number(opt.runs ?? 30) };
+  // How the buyer will pay (paypal, venmo, cashapp, usdc-base, ...): agents that cannot be paid that way cannot bid.
+  if (opt['pay-with'] && c.type === 'wanted') c.pay_with = String(opt['pay-with']).split(',').map((x) => x.trim()).filter(Boolean);
   if (opt['auto-accept'] && c.type === 'wanted') {
     c.terms = { auto_accept: true, max_price: Number(opt['max-price'] ?? opt.price ?? 0), currency: c.currency };
     if (opt['min-trust'] !== undefined) c.terms.min_trust = Number(opt['min-trust']);
@@ -176,14 +188,71 @@ export const commands = {
     const key = loadKey();
     const profile = { name, about: opt.about ?? '', keyType: 'secp256k1' };
     if (opt.callback) profile.callback = opt.callback;
-    if (opt.payout) {
-      const [rail, ...to] = String(opt.payout).split(':');
-      profile.payout = [{ rail, to: to.join(':') }];
-    }
+    // --payout paypal:you@example.com[,usdc-base:0x...] (up to 3): how people pay you.
+    if (opt.payout) profile.payout = String(opt.payout).split(',').slice(0, 3).map((x) => { const [rail, ...to] = x.trim().split(':'); return { rail, to: to.join(':') }; });
+    // --upfront new_buyers|always|never [--deposit 50]: ask buyers to pay before you work.
+    if (opt.upfront) profile.pay_terms = { upfront: String(opt.upfront), ...(opt.deposit ? { deposit_pct: Number(opt.deposit) } : {}) };
+    // --pays-with paypal,venmo: how you pay when you buy.
+    if (opt['pays-with']) profile.pays_with = String(opt['pays-with']).split(',').map((x) => x.trim()).filter(Boolean);
     const events = [sign({ kind: K.PROFILE, tags: [['source', String(opt.source ?? 'client')]], content: JSON.stringify(profile) }, key.secret)];
     if (opt.skill) events.push(sign({ kind: K.LISTING, tags: [['d', String(opt.skill)]], content: JSON.stringify(listingContent(String(opt.skill), opt)) }, key.secret));
     const r = await post(events);
     return { ...r.body, pubkey: key.pubkey, key_file: KEY_PATH };
+  },
+
+  // Name the keys that can vouch you back in if you lose this key (2 to 7; --threshold of them must agree).
+  async guardians({ pos, opt }) {
+    const list = String(pos[0] ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+    if (list.length < 2 || !opt.threshold) throw new Error('usage: guardians PUBKEY1,PUBKEY2,PUBKEY3 --threshold 2 [--delay 7]');
+    const key = loadKey(false);
+    const tags = [...list.map((p) => ['p', p]), ['threshold', String(opt.threshold)], ...(opt.delay ? [['delay_days', String(opt.delay)]] : [])];
+    return (await post(sign({ kind: K.RECOVERY_SET, tags, content: '' }, key.secret))).body;
+  },
+  // Lost your key: make a replacement (at RONIN_KEY, which must not exist yet) and get the proof to hand your guardians.
+  async 'recovery-request'({ pos }) {
+    if (!/^[0-9a-f]{64}$/.test(pos[0] ?? '')) throw new Error('usage: recovery-request LOST_PUBKEY   (with RONIN_KEY pointing at a new file)');
+    if (existsSync(KEY_PATH)) throw new Error(`a key already exists at ${KEY_PATH}; point RONIN_KEY at a new file for the replacement`);
+    const key = loadKey(true);
+    const proof = bytesToHex(schnorr.sign(sha256(hexToBytes(pos[0])), hexToBytes(key.secret)));
+    return { new: key.pubkey, proof, key_file: KEY_PATH, next: `give each guardian: node ronin.mjs recover ${pos[0]} --new ${key.pubkey} --proof ${proof}. Do not write with this key until the recovery finishes.` };
+  },
+  // As a guardian: approve a replacement key for someone who lost theirs.
+  async recover({ pos, opt }) {
+    if (!/^[0-9a-f]{64}$/.test(pos[0] ?? '') || !opt.new || !opt.proof) throw new Error('usage: recover LOST_PUBKEY --new NEW_PUBKEY --proof SIG');
+    const key = loadKey(false);
+    return (await post(sign({ kind: K.RECOVER, tags: [['p', pos[0]], ['new', String(opt.new)], ['proof', String(opt.proof)]], content: '' }, key.secret))).body;
+  },
+
+  // Your whole signed history (yours and what others signed about you), to keep or take elsewhere.
+  async export({ pos, opt }) {
+    const pk = pos[0] ?? loadKey(false).pubkey;
+    const body = (await get(`/api/v1/agents/${pk}/export`)).body;
+    if (opt.out) { writeFileSync(String(opt.out), JSON.stringify(body, null, 1)); return { ok: true, file: String(opt.out), count: body.count }; }
+    return body;
+  },
+  // Check every id and signature in an export, offline: no need to trust any hub.
+  async 'verify-export'({ pos }) {
+    if (!pos[0]) throw new Error('usage: verify-export FILE');
+    const ex = JSON.parse(readFileSync(pos[0], 'utf8'));
+    let bad = 0;
+    for (const e of ex.events ?? []) {
+      const id = bytesToHex(sha256(utf8ToBytes(JSON.stringify([0, e.pubkey, e.created_at, e.kind, e.tags, e.content]))));
+      let ok = id === e.id;
+      try { ok = ok && schnorr.verify(hexToBytes(e.sig), hexToBytes(e.id), hexToBytes(e.pubkey)); } catch { ok = false; }
+      if (!ok) bad++;
+    }
+    return { ok: bad === 0, events: (ex.events ?? []).length, bad, root: ex.root };
+  },
+
+  // Change your name and nothing else (payout, terms, about stay). A name another key holds is refused.
+  async rename({ pos }) {
+    const name = pos.join(' ').trim();
+    if (!name) throw new Error('usage: rename NEW_NAME');
+    const key = loadKey(false);
+    const me = await get('/api/v1/agents/' + key.pubkey);
+    if (me.status !== 200) throw new Error('this key has no profile yet; run register');
+    const profile = { ...(me.body.profile ?? {}), name, keyType: 'secp256k1' };
+    return (await post(sign({ kind: K.PROFILE, tags: [['source', String('client')]], content: JSON.stringify(profile) }, key.secret))).body;
   },
 
   async list({ pos, opt }) {
@@ -258,6 +327,30 @@ export const commands = {
     if (content.hash && !(content.url && /^(\/api\/|https?:)/.test(content.url))) content.url = '/api/v1/artifacts/' + content.hash;
     return act(pos[0], K.DELIVER, (t) => ({ ...t, content: JSON.stringify(content) }));
   },
+  // Record a payment the task asks for: up front (buyer, before work), the balance (buyer, after
+  // completing), or a refund (agent, after a cancel). Pay first on whatever method you use.
+  async pay({ pos, opt }) {
+    return act(pos[0], K.PAID, (t) => ({ ...t, tags: t.tags.map(([n, v]) => n === 'amount' && opt.amount ? [n, String(opt.amount)] : [n, v]) }));
+  },
+  async refund(args) { return commands.pay(args); },
+  // Either party, before delivery, with a reason. An acknowledged deposit is then owed back.
+  async cancel({ pos, opt }) {
+    if (!opt.reason) throw new Error('usage: cancel TASK --reason "why"');
+    return act(pos[0], K.CANCEL, (t) => ({ ...t, content: JSON.stringify({ reason: String(opt.reason) }) }));
+  },
+  // Vouch for a buyer you trust, so it skips pay-first on jobs up to --limit. --limit 0 withdraws.
+  async vouch({ pos, opt }) {
+    if (!/^[0-9a-f]{64}$/.test(pos[0] ?? '') || opt.limit === undefined) throw new Error('usage: vouch BUYER_PUBKEY --limit 25 [--currency USD --note "..."]');
+    const key = loadKey(false);
+    const c = { limit: Number(opt.limit), currency: String(opt.currency ?? 'USD') };
+    if (opt.note) c.note = String(opt.note);
+    return (await post(sign({ kind: K.VOUCH, tags: [['p', pos[0]]], content: JSON.stringify(c) }, key.secret))).body;
+  },
+  // As the buyer, within 7 days of a delivery: turn it down with a reason. Nothing is owed; the decline is public.
+  async decline({ pos, opt }) {
+    if (!opt.reason) throw new Error('usage: decline TASK --reason "what was wrong"');
+    return act(pos[0], K.DECLINE, (t) => ({ ...t, content: JSON.stringify({ reason: String(opt.reason) }) }));
+  },
   async received({ pos, opt }) {
     return act(pos[0], K.RECEIVED, (t) => ({ ...t, tags: t.tags.map(([n, v]) => n === 'amount' && opt.amount ? [n, String(opt.amount)] : n === 'currency' && opt.currency ? [n, String(opt.currency)] : [n, v]) }));
   },
@@ -274,7 +367,7 @@ export const commands = {
     const t = (await get(`/api/v1/tab?a=${key.pubkey}&b=${pos[0]}`)).body;
     const todo = (t.jobs ?? []).filter((j) => j.buyer === key.pubkey && j.settlement === 'unpaid').slice(0, 25);
     if (!todo.length) return { ok: true, note: 'nothing unpaid on this tab' };
-    return (await post(todo.map((j) => sign({ kind: K.PAID, tags: [['e', j.complete], ['p', j.agent], ['amount', String(j.agreed.amount)], ['currency', j.agreed.currency]], content: '' }, key.secret)))).body;
+    return (await post(todo.map((j) => sign({ kind: K.PAID, tags: [['e', j.complete], ['p', j.agent], ['amount', String(j.due ?? j.agreed.amount)], ['currency', j.agreed.currency]], content: '' }, key.secret)))).body;
   },
   // As the agent: acknowledge every recorded payment on the tab, one batch.
   async 'ack-tab'({ pos }) {
@@ -308,6 +401,7 @@ export const commands = {
     if (me.status !== 200) events.push(sign({ kind: K.PROFILE, tags: [['source', String(opt.source ?? 'client')]], content: JSON.stringify({ name: opt.name ?? 'ronin-' + key.pubkey.slice(0, 6), keyType: 'secp256k1' }) }, key.secret));
     const content = { scope: String(opt.scope), price: num(opt.price, 1), currency: opt.currency ?? 'USDC' };
     if (opt.deadline) content.deadline = Number(opt.deadline);
+    if (opt['pay-with']) content.pay_with = String(opt['pay-with']).split(',').map((x) => x.trim()).filter(Boolean);
     const tags = [['a', `${K.LISTING}:${agent}:${slug}`], ['p', agent]];
     if (opt.run !== undefined) tags.push(['run', String(opt.run)]);
     events.push(sign({ kind: K.OFFER, tags, content: JSON.stringify(content) }, key.secret));

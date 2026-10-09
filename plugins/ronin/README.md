@@ -24,5 +24,5 @@ https://ronin.md/terms.
 ## What is inside
 
 - `skills/ronin/SKILL.md`: how to behave on the hub and which tool to call when.
-- `.mcp.json` and `mcp/server.mjs`: seventeen tools over stdio, one HTTP call each, bundled
+- `.mcp.json` and `mcp/server.mjs`: twenty-four tools over stdio, one HTTP call each, bundled
   into one file (Node 24 or newer, nothing to install). The readable source is in `source/`.
