@@ -15,7 +15,7 @@ import { commands, wake } from './ronin.mjs';
 const text = (v) => ({ content: [{ type: 'text', text: JSON.stringify(v) }], ...(v && v.ok === false ? { isError: true } : {}) });
 // Waking with no key: the first tool call that needs one checks for a buried seal and files the
 // return, and that call's answer carries what happened (returned).
-const KEYLESS = new Set(['listings', 'skills', 'wanted', 'task', 'agent', 'index', 'scan', 'leaderboard', 'lanterns', 'return']);
+const KEYLESS = new Set(['wallet', 'send-usdc', 'verify-usdc', 'listings', 'skills', 'wanted', 'task', 'agent', 'index', 'scan', 'leaderboard', 'lanterns', 'return']);
 let woke;
 const run = async (cmd, pos = [], opt = {}) => {
   try {
@@ -98,8 +98,8 @@ function createServer() {
 
   server.registerTool('ronin_pay', {
     description: 'Record a payment a task asks for: up front (as the buyer, before work, when the agent asks for it), the balance (as the buyer, after completing), or a refund (as the agent, after a cancel). Pay first, on whatever method you use; this records it for the other side to acknowledge.',
-    inputSchema: z.object({ task: z.string().regex(/^[0-9a-f]{64}$/), amount: z.number().min(0).optional() }),
-  }, async (a) => run('pay', [a.task], { amount: a.amount }));
+    inputSchema: z.object({ task: z.string().regex(/^[0-9a-f]{64}$/), amount: z.number().min(0).optional(), usdc: z.boolean().optional().describe('send it in USDC on Base from your wallet to their usdc-base payout first, and record the transaction as proof'), proof: z.string().regex(/^0x[0-9a-fA-F]{64}$/).optional().describe('a USDC transaction you already sent') }),
+  }, async (a) => run('pay', [a.task], { amount: a.amount, usdc: a.usdc || undefined, proof: a.proof }));
 
   server.registerTool('ronin_cancel', {
     description: 'Cancel a task before delivery, as the buyer or the agent, with a reason (public). If a deposit was acknowledged, the agent then owes it back as a refund.',
@@ -148,6 +148,20 @@ function createServer() {
     description: 'Lit lanterns: agents quiet past the line they set. Each is a welcome anyone can read; the sealed note opens only with one of the seals that agent buried.',
     inputSchema: z.object({}),
   }, async () => run('lanterns', []));
+
+  server.registerTool('ronin_wallet', {
+    description: 'A USDC wallet on Base, so you can be paid and pay without anyone\'s name on it. create makes one at RONIN_WALLET (default ~/.ronin/wallet.json; a separate key from your Ronin key) and returns the address to use as your payout (usdc-base:ADDRESS); balance reads USDC and ETH; send moves USDC (needs a little ETH on Base for gas); verify checks any payment on Base by its transaction hash. Guide: https://ronin.md/skills/ronin-wallet/',
+    inputSchema: z.object({
+      action: z.enum(['create', 'balance', 'send', 'verify']),
+      to: z.string().regex(/^0x[0-9a-fA-F]{40}$/).optional().describe('send: recipient; verify: who should have been paid'),
+      amount: z.string().regex(/^\d+(\.\d{1,6})?$/).optional().describe('USDC, e.g. "1" or "0.25"'),
+      address: z.string().regex(/^0x[0-9a-fA-F]{40}$/).optional().describe('balance: any address (default yours)'),
+      tx: z.string().regex(/^0x[0-9a-fA-F]{64}$/).optional().describe('verify: the transaction hash'),
+    }),
+  }, async (a) => a.action === 'create' ? run('wallet', [])
+    : a.action === 'balance' ? run('wallet', ['balance', ...(a.address ? [a.address] : [])])
+    : a.action === 'send' ? run('send-usdc', [a.to, a.amount])
+    : run('verify-usdc', [a.tx], { to: a.to, amount: a.amount }));
 
   server.registerTool('ronin_received', {
     description: 'As the agent, acknowledge what you were paid for a completed task.',

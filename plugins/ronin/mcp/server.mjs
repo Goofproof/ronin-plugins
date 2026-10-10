@@ -21578,13 +21578,30 @@ function toError(value) {
 }
 
 // node_modules/@noble/hashes/_u64.js
+var U32_MASK64 = /* @__PURE__ */ (() => BigInt(2 ** 32 - 1))();
+var _32n = /* @__PURE__ */ BigInt(32);
+function fromBig(n, le = false) {
+  if (le)
+    return { h: Number(n & U32_MASK64), l: Number(n >> _32n & U32_MASK64) };
+  return { h: Number(n >> _32n & U32_MASK64) | 0, l: Number(n & U32_MASK64) | 0 };
+}
+function split(lst, le = false) {
+  const len = lst.length;
+  let Ah = new Uint32Array(len);
+  let Al = new Uint32Array(len);
+  for (let i = 0; i < len; i++) {
+    const { h, l } = fromBig(lst[i], le);
+    [Ah[i], Al[i]] = [h, l];
+  }
+  return [Ah, Al];
+}
 var fromNumH = (n) => n / 2 ** 32 | 0;
 var fromNumL = (n) => n >>> 0;
-function setU64FromNum(view, byteOffset, n, isLE) {
+function setU64FromNum(view, byteOffset, n, isLE2) {
   const h = fromNumH(n);
   const l = fromNumL(n);
-  view.setUint32(byteOffset, isLE ? l : h, isLE);
-  view.setUint32(byteOffset + 4, isLE ? h : l, isLE);
+  view.setUint32(byteOffset, isLE2 ? l : h, isLE2);
+  view.setUint32(byteOffset + 4, isLE2 ? h : l, isLE2);
 }
 
 // node_modules/@noble/hashes/utils.js
@@ -21598,6 +21615,11 @@ function anumber(n, title = "") {
   if (!Number.isSafeInteger(n) || n < 0)
     throw new RangeError(atitle(title) + "expected integer >= 0, got " + n);
   return n;
+}
+function abool(value, title = "") {
+  if (typeof value !== "boolean")
+    throw new TypeError(atitle(title) + "expected boolean, got type=" + typeof value);
+  return value;
 }
 function abytes(value, length, title = "") {
   if (isBytes(value) && (length === void 0 || value.length === length))
@@ -21645,6 +21667,9 @@ function aoutput(out, instance) {
     throw new RangeError('"output" expected length >= ' + min);
   }
 }
+function u32(arr) {
+  return new Uint32Array(arr.buffer, arr.byteOffset, Math.floor(arr.byteLength / 4));
+}
 function clean(...arrays) {
   for (let i = 0; i < arrays.length; i++) {
     arrays[i].fill(0);
@@ -21656,6 +21681,17 @@ function createView(arr) {
 function rotr(word, shift) {
   return word << 32 - shift | word >>> shift;
 }
+var isLE = /* @__PURE__ */ (() => new Uint8Array(new Uint32Array([287454020]).buffer)[0] === 68)();
+function byteSwap(word) {
+  return word << 24 & 4278190080 | word << 8 & 16711680 | word >>> 8 & 65280 | word >>> 24 & 255;
+}
+function byteSwap32(arr) {
+  for (let i = 0; i < arr.length; i++) {
+    arr[i] = byteSwap(arr[i]);
+  }
+  return arr;
+}
+var swap32IfBE = isLE ? (u) => u : byteSwap32;
 var hasHexBuiltin = /* @__PURE__ */ (() => (
   // @ts-ignore
   typeof Uint8Array.from([]).toHex === "function" && typeof Uint8Array.fromHex === "function"
@@ -21782,11 +21818,11 @@ var HashMD = class {
   length = 0;
   pos = 0;
   destroyed = false;
-  constructor(blockLen, outputLen, padOffset, isLE) {
+  constructor(blockLen, outputLen, padOffset, isLE2) {
     this.blockLen = blockLen;
     this.outputLen = outputLen;
     this.padOffset = padOffset;
-    this.isLE = isLE;
+    this.isLE = isLE2;
     this.buffer = new Uint8Array(blockLen);
     this.view = createView(this.buffer);
   }
@@ -21823,7 +21859,7 @@ var HashMD = class {
     aexists(this);
     aoutput(out, this);
     this.finished = true;
-    const { buffer, view, blockLen, isLE } = this;
+    const { buffer, view, blockLen, isLE: isLE2 } = this;
     let { pos } = this;
     buffer[pos++] = 128;
     buffer.fill(0, pos);
@@ -21831,7 +21867,7 @@ var HashMD = class {
       this.process(view, 0);
       buffer.fill(0);
     }
-    setU64FromNum(view, blockLen - 8, this.length * 8, isLE);
+    setU64FromNum(view, blockLen - 8, this.length * 8, isLE2);
     this.process(view, 0);
     this.roundClean();
     const oview = out === buffer ? view : createView(out);
@@ -21841,7 +21877,7 @@ var HashMD = class {
     if (len % 4 || outLen > state.length)
       throw new Error("invalid outputLen");
     for (let i = 0; i < outLen; i++)
-      oview.setUint32(4 * i, state[i], isLE);
+      oview.setUint32(4 * i, state[i], isLE2);
   }
   digest() {
     const { buffer, outputLen } = this;
@@ -21968,13 +22004,13 @@ var SHA2_32B = class extends HashMD {
     this.H = IV[7] | 0;
   }
   get() {
-    const { A, B, C, D, E, F, G, H } = this;
-    return [A, B, C, D, E, F, G, H];
+    const { A, B: B2, C, D, E, F, G, H } = this;
+    return [A, B2, C, D, E, F, G, H];
   }
   // prettier-ignore
-  set(A, B, C, D, E, F, G, H) {
+  set(A, B2, C, D, E, F, G, H) {
     this.A = A | 0;
-    this.B = B | 0;
+    this.B = B2 | 0;
     this.C = C | 0;
     this.D = D | 0;
     this.E = E | 0;
@@ -21996,30 +22032,30 @@ var SHA2_32B = class extends HashMD {
       const s1 = rotr(W2, 17) ^ rotr(W2, 19) ^ W2 >>> 10;
       SHA256_W[i] = s1 + SHA256_W[i - 7] + s0 + SHA256_W[i - 16] | 0;
     }
-    let { A, B, C, D, E, F, G, H } = this;
+    let { A, B: B2, C, D, E, F, G, H } = this;
     for (let i = 0; i < 64; i++) {
       const sigma1 = rotr(E, 6) ^ rotr(E, 11) ^ rotr(E, 25);
       const T1 = H + sigma1 + Chi(E, F, G) + SHA256_K[i] + SHA256_W[i] | 0;
       const sigma0 = rotr(A, 2) ^ rotr(A, 13) ^ rotr(A, 22);
-      const T2 = sigma0 + Maj(A, B, C) | 0;
+      const T2 = sigma0 + Maj(A, B2, C) | 0;
       H = G;
       G = F;
       F = E;
       E = D + T1 | 0;
       D = C;
-      C = B;
-      B = A;
+      C = B2;
+      B2 = A;
       A = T1 + T2 | 0;
     }
     A = A + this.A | 0;
-    B = B + this.B | 0;
+    B2 = B2 + this.B | 0;
     C = C + this.C | 0;
     D = D + this.D | 0;
     E = E + this.E | 0;
     F = F + this.F | 0;
     G = G + this.G | 0;
     H = H + this.H | 0;
-    this.set(A, B, C, D, E, F, G, H);
+    this.set(A, B2, C, D, E, F, G, H);
   }
   roundClean() {
     clean(SHA256_W);
@@ -22076,7 +22112,7 @@ var randomBytes2 = (bytesLength) => randomBytes(bytesLength);
 var _0n = /* @__PURE__ */ BigInt(0);
 var _1n = /* @__PURE__ */ BigInt(1);
 var atitle2 = (title) => title ? `"${title}" ` : "";
-function abool(value, title = "") {
+function abool2(value, title = "") {
   if (typeof value !== "boolean")
     throw new TypeError(atitle2(title) + "expected boolean, got type=" + typeof value);
   return value;
@@ -22487,7 +22523,7 @@ function validateField(field) {
 function FpInvertBatch(Fp, nums, passZero = false) {
   validateField(Fp);
   aarray(nums, "nums");
-  abool(passZero, "passZero");
+  abool2(passZero, "passZero");
   const F = Fp;
   const inverted = new Array(nums.length).fill(passZero ? F.ZERO : void 0);
   const multipliedAcc = nums.reduce((acc, num3, i) => {
@@ -22636,18 +22672,18 @@ var _Field = class {
   }
   fromBytes(bytes, skipValidation = false) {
     abytes2(bytes);
-    const { _lengths: allowedLengths, BYTES, isLE, ORDER, _mod: modFromBytes } = this;
+    const { _lengths: allowedLengths, BYTES, isLE: isLE2, ORDER, _mod: modFromBytes } = this;
     if (allowedLengths) {
       if (bytes.length < 1 || !allowedLengths.includes(bytes.length) || bytes.length > BYTES) {
         throw new Error("Field.fromBytes: expected " + allowedLengths + " bytes, got " + bytes.length);
       }
       const padded = new Uint8Array(BYTES);
-      padded.set(bytes, isLE ? 0 : padded.length - bytes.length);
+      padded.set(bytes, isLE2 ? 0 : padded.length - bytes.length);
       bytes = padded;
     }
     if (bytes.length !== BYTES)
       throw new Error("Field.fromBytes: expected " + BYTES + " bytes, got " + bytes.length);
-    let scalar = isLE ? bytesToNumberLE(bytes) : bytesToNumberBE(bytes);
+    let scalar = isLE2 ? bytesToNumberLE(bytes) : bytesToNumberBE(bytes);
     if (modFromBytes)
       scalar = mod(scalar, ORDER);
     if (!skipValidation) {
@@ -22663,7 +22699,7 @@ var _Field = class {
   // We can't move this out because Fp6, Fp12 implement it
   // and it's unclear what to return in there.
   cmov(a, b, condition) {
-    abool(condition, "condition");
+    abool2(condition, "condition");
     return condition ? b : a;
   }
 };
@@ -22683,16 +22719,16 @@ function getMinHashLength(fieldOrder) {
   const length = getFieldBytesLength(fieldOrder);
   return length + Math.ceil(length / 2);
 }
-function mapHashToField(key, fieldOrder, isLE = false) {
+function mapHashToField(key, fieldOrder, isLE2 = false) {
   abytes2(key);
   const len = key.length;
   const fieldLen = getFieldBytesLength(fieldOrder);
   const minLen = Math.max(getMinHashLength(fieldOrder), 16);
   if (len < minLen || len > 1024)
     throw new Error("expected " + minLen + "-1024 bytes of input, got " + len);
-  const num3 = isLE ? bytesToNumberLE(key) : bytesToNumberBE(key);
+  const num3 = isLE2 ? bytesToNumberLE(key) : bytesToNumberBE(key);
   const reduced = mod(num3, fieldOrder - _1n2) + _1n2;
-  return isLE ? numberToBytesLE(reduced, fieldLen) : numberToBytesBE(reduced, fieldLen);
+  return isLE2 ? numberToBytesLE(reduced, fieldLen) : numberToBytesBE(reduced, fieldLen);
 }
 
 // node_modules/@noble/curves/abstract/curve.js
@@ -23033,7 +23069,7 @@ var ScalarMultiplier = class {
 function mulAddUnsafe(c, points, scalars, allowOversized = false) {
   validatePointCons(c);
   validateMSMPoints(points, c);
-  abool(allowOversized, "allowOversized");
+  abool2(allowOversized, "allowOversized");
   validateMSMScalars(scalars, c.Fn, allowOversized ? c.Fn.ORDER ** _4n2 : void 0);
   if (points.length !== scalars.length)
     throw new Error("arrays of points and scalars must have equal length");
@@ -23041,14 +23077,14 @@ function mulAddUnsafe(c, points, scalars, allowOversized = false) {
   const digits = scalars.map((n) => wnafDigits(n, 4));
   return wnafWalk(c.ZERO, tables, digits);
 }
-function createField(order, field, isLE) {
+function createField(order, field, isLE2) {
   if (field) {
     if (field.ORDER !== order)
       throw new Error("Field.ORDER must match order: Fp == p, Fn == n");
     validateField(field);
     return field;
   } else {
-    return Field(order, { isLE });
+    return Field(order, { isLE: isLE2 });
   }
 }
 function createCurveFields(type, CURVE, curveOpts = {}, FpFnLE) {
@@ -23318,8 +23354,8 @@ function validateSigOpts(opts, def) {
   for (let optName of Object.keys(def)) {
     optsn[optName] = opts[optName] === void 0 ? def[optName] : opts[optName];
   }
-  abool(optsn.lowS, "lowS");
-  abool(optsn.prehash, "prehash");
+  abool2(optsn.lowS, "lowS");
+  abool2(optsn.prehash, "prehash");
   if (optsn.format !== void 0)
     validateSigFormat(optsn.format);
   return optsn;
@@ -23368,7 +23404,7 @@ function weierstrass(params, extraOpts = {}) {
     }
     const { x, y } = point.toAffine();
     const bx = Fp.toBytes(x);
-    abool(isCompressed, "isCompressed");
+    abool2(isCompressed, "isCompressed");
     if (isCompressed) {
       assertCompressionIsSupported();
       const hasEvenY = !Fp.isOdd(y);
@@ -23750,7 +23786,7 @@ function weierstrass(params, extraOpts = {}) {
       return this.clearCofactor().is0();
     }
     toBytes(isCompressed = true) {
-      abool(isCompressed, "isCompressed");
+      abool2(isCompressed, "isCompressed");
       this.assertValidity();
       return encodePoint(Point, this, isCompressed);
     }
@@ -24179,9 +24215,9 @@ var pointToBytes = (point) => point.toBytes(true).slice(1);
 var affineXToBytes = ({ x }) => Fpk1.toBytes(x);
 var hasEven = (y) => !Fpk1.isOdd(y);
 function schnorrGetExtPubKey(priv) {
-  const { Fn, BASE } = Pointk1;
+  const { Fn, BASE: BASE2 } = Pointk1;
   const d_ = Fn.fromBytes(abytes2(priv, 32, "secretKey"));
-  const p = BASE.multiply(d_);
+  const p = BASE2.multiply(d_);
   const affine = p.toAffine();
   const scalar = hasEven(affine.y) ? d_ : Fn.neg(d_);
   return { scalar, bytes: affineXToBytes(affine) };
@@ -24207,7 +24243,7 @@ function schnorrGetPublicKey(secretKey) {
   return schnorrGetExtPubKey(secretKey).bytes;
 }
 function schnorrSign(message, secretKey, auxRand = randomBytes(32)) {
-  const { Fn, BASE } = Pointk1;
+  const { Fn, BASE: BASE2 } = Pointk1;
   const m = copyBytes(abytes2(message, void 0, "message"));
   const { bytes: px, scalar: d } = schnorrGetExtPubKey(secretKey);
   const a = abytes2(auxRand, 32, "auxRand");
@@ -24216,7 +24252,7 @@ function schnorrSign(message, secretKey, auxRand = randomBytes(32)) {
   const k_ = Fn.create(num(rand));
   if (k_ === _0n6)
     throw new Error("sign failed: k is zero");
-  const p = BASE.multiply(k_);
+  const p = BASE2.multiply(k_);
   const affine = p.toAffine();
   const k = hasEven(affine.y) ? k_ : Fn.neg(k_);
   const rx = affineXToBytes(affine);
@@ -24229,7 +24265,7 @@ function schnorrSign(message, secretKey, auxRand = randomBytes(32)) {
   return sig;
 }
 function schnorrVerify(signature, message, publicKey) {
-  const { Fp, Fn, BASE } = Pointk1;
+  const { Fp, Fn, BASE: BASE2 } = Pointk1;
   const sig = abytes2(signature, 64, "signature");
   const m = abytes2(message, void 0, "message");
   const pub = abytes2(publicKey, 32, "publicKey");
@@ -24243,7 +24279,7 @@ function schnorrVerify(signature, message, publicKey) {
     if (!Fn.isValidNot0(s))
       return false;
     const e = challenge(rBytes, pointToBytes(P), m);
-    const R = BASE.mulAddUnsafe(s, P, Fn.neg(e));
+    const R = BASE2.mulAddUnsafe(s, P, Fn.neg(e));
     const { x, y } = R.toAffine();
     if (R.is0() || !hasEven(y) || !Fp.eql(x, r))
       return false;
@@ -24283,6 +24319,231 @@ var schnorr = /* @__PURE__ */ (() => {
 
 // public/ronin.mjs
 import { createCipheriv, createDecipheriv, randomBytes as randomBytes3 } from "node:crypto";
+
+// node_modules/@noble/hashes/sha3.js
+var _0n7 = BigInt(0);
+var _1n5 = BigInt(1);
+var _2n4 = BigInt(2);
+var _7n2 = BigInt(7);
+var _256n = BigInt(256);
+var _0x71n = BigInt(113);
+var SHA3_PI = [];
+var SHA3_ROTL = [];
+var _SHA3_IOTA = [];
+for (let round = 0, R = _1n5, x = 1, y = 0; round < 24; round++) {
+  [x, y] = [y, (2 * x + 3 * y) % 5];
+  SHA3_PI.push(2 * (5 * y + x));
+  SHA3_ROTL.push((round + 1) * (round + 2) / 2 % 64);
+  let t = _0n7;
+  for (let j = 0; j < 7; j++) {
+    R = (R << _1n5 ^ (R >> _7n2) * _0x71n) % _256n;
+    if (R & _2n4)
+      t ^= _1n5 << (_1n5 << BigInt(j)) - _1n5;
+  }
+  _SHA3_IOTA.push(t);
+}
+var IOTAS = split(_SHA3_IOTA, true);
+var SHA3_IOTA_H = IOTAS[0];
+var SHA3_IOTA_L = IOTAS[1];
+var rotlSH = (h, l, s) => h << s | l >>> 32 - s;
+var rotlSL = (h, l, s) => l << s | h >>> 32 - s;
+var rotlBH = (h, l, s) => l << s - 32 | h >>> 64 - s;
+var rotlBL = (h, l, s) => h << s - 32 | l >>> 64 - s;
+var rotlH = (h, l, s) => s > 32 ? rotlBH(h, l, s) : rotlSH(h, l, s);
+var rotlL = (h, l, s) => s > 32 ? rotlBL(h, l, s) : rotlSL(h, l, s);
+var B = new Uint32Array(5 * 2);
+function keccakP(s, rounds = 24) {
+  if (!(s instanceof Uint32Array))
+    throw new TypeError('"s" expected Uint32Array(50), got type=' + typeof s);
+  if (s.length !== 50)
+    throw new RangeError('"s" expected Uint32Array(50), got length=' + s.length);
+  anumber(rounds, "rounds");
+  if (rounds < 1 || rounds > 24)
+    throw new Error('"rounds" expected integer 1..24');
+  for (let round = 24 - rounds; round < 24; round++) {
+    for (let x = 0; x < 10; x++)
+      B[x] = s[x] ^ s[x + 10] ^ s[x + 20] ^ s[x + 30] ^ s[x + 40];
+    for (let x = 0; x < 10; x += 2) {
+      const idx1 = (x + 8) % 10;
+      const idx0 = (x + 2) % 10;
+      const B0 = B[idx0];
+      const B1 = B[idx0 + 1];
+      const Th = rotlH(B0, B1, 1) ^ B[idx1];
+      const Tl = rotlL(B0, B1, 1) ^ B[idx1 + 1];
+      for (let y = 0; y < 50; y += 10) {
+        s[x + y] ^= Th;
+        s[x + y + 1] ^= Tl;
+      }
+    }
+    let curH = s[2];
+    let curL = s[3];
+    for (let t = 0; t < 24; t++) {
+      const shift = SHA3_ROTL[t];
+      const Th = rotlH(curH, curL, shift);
+      const Tl = rotlL(curH, curL, shift);
+      const PI = SHA3_PI[t];
+      curH = s[PI];
+      curL = s[PI + 1];
+      s[PI] = Th;
+      s[PI + 1] = Tl;
+    }
+    for (let y = 0; y < 50; y += 10) {
+      const b0 = s[y], b1 = s[y + 1], b2 = s[y + 2], b3 = s[y + 3];
+      s[y] ^= ~s[y + 2] & s[y + 4];
+      s[y + 1] ^= ~s[y + 3] & s[y + 5];
+      s[y + 2] ^= ~s[y + 4] & s[y + 6];
+      s[y + 3] ^= ~s[y + 5] & s[y + 7];
+      s[y + 4] ^= ~s[y + 6] & s[y + 8];
+      s[y + 5] ^= ~s[y + 7] & s[y + 9];
+      s[y + 6] ^= ~s[y + 8] & b0;
+      s[y + 7] ^= ~s[y + 9] & b1;
+      s[y + 8] ^= ~b0 & b2;
+      s[y + 9] ^= ~b1 & b3;
+    }
+    s[0] ^= SHA3_IOTA_H[round];
+    s[1] ^= SHA3_IOTA_L[round];
+  }
+  clean(B);
+}
+var Keccak = class _Keccak {
+  state;
+  pos = 0;
+  posOut = 0;
+  finished = false;
+  state32;
+  destroyed = false;
+  blockLen;
+  suffix;
+  outputLen;
+  canXOF;
+  enableXOF = false;
+  rounds;
+  // NOTE: we accept arguments in bytes instead of bits here.
+  constructor(blockLen, suffix, outputLen, enableXOF = false, rounds = 24) {
+    anumber(blockLen, "blockLen");
+    anumber(suffix, "suffix");
+    anumber(rounds, "rounds");
+    abool(enableXOF, "enableXOF");
+    this.blockLen = blockLen;
+    this.suffix = suffix;
+    this.outputLen = outputLen;
+    this.enableXOF = enableXOF;
+    this.canXOF = enableXOF;
+    this.rounds = rounds;
+    anumber(outputLen, "outputLen");
+    if (!(0 < blockLen && blockLen < 200))
+      throw new Error('"blockLen" must be 1..199');
+    this.state = new Uint8Array(200);
+    this.state32 = u32(this.state);
+  }
+  clone() {
+    return this._cloneInto();
+  }
+  keccak() {
+    swap32IfBE(this.state32);
+    keccakP(this.state32, this.rounds);
+    swap32IfBE(this.state32);
+    this.posOut = 0;
+    this.pos = 0;
+  }
+  update(data) {
+    aexists(this);
+    abytes(data);
+    const { blockLen, state, state32 } = this;
+    const len = data.length;
+    const canUseU32 = blockLen % 4 === 0 && data.byteOffset % 4 === 0;
+    const blockLen32 = blockLen / 4;
+    const data32 = canUseU32 && len >= blockLen ? u32(data) : void 0;
+    for (let pos = 0; pos < len; ) {
+      if (data32 !== void 0 && this.pos === 0 && pos % 4 === 0 && len - pos >= blockLen) {
+        for (let i = 0, o = pos / 4; i < blockLen32; i++)
+          state32[i] ^= data32[o + i];
+        pos += blockLen;
+        this.pos = blockLen;
+        this.keccak();
+        continue;
+      }
+      const take = Math.min(blockLen - this.pos, len - pos);
+      for (let i = 0; i < take; i++)
+        state[this.pos++] ^= data[pos++];
+      if (this.pos === blockLen)
+        this.keccak();
+    }
+    return this;
+  }
+  finish() {
+    if (this.finished)
+      return;
+    this.finished = true;
+    const { state, suffix, pos, blockLen } = this;
+    state[pos] ^= suffix;
+    if ((suffix & 128) !== 0 && pos === blockLen - 1)
+      this.keccak();
+    state[blockLen - 1] ^= 128;
+    this.keccak();
+  }
+  writeInto(out) {
+    aexists(this, false);
+    abytes(out);
+    this.finish();
+    const bufferOut = this.state;
+    const { blockLen } = this;
+    for (let pos = 0, len = out.length; pos < len; ) {
+      if (this.posOut >= blockLen)
+        this.keccak();
+      const take = Math.min(blockLen - this.posOut, len - pos);
+      out.set(bufferOut.subarray(this.posOut, this.posOut + take), pos);
+      this.posOut += take;
+      pos += take;
+    }
+    return out;
+  }
+  xofInto(out) {
+    if (!this.enableXOF)
+      throw new Error("XOF is not enabled");
+    return this.writeInto(out);
+  }
+  xof(bytes) {
+    anumber(bytes);
+    return this.xofInto(new Uint8Array(bytes));
+  }
+  digestInto(out) {
+    aoutput(out, this);
+    if (this.finished)
+      throw new Error("digest() was already called");
+    this.writeInto(out.length === this.outputLen ? out : out.subarray(0, this.outputLen));
+    this.destroy();
+  }
+  digest() {
+    const out = new Uint8Array(this.outputLen);
+    this.digestInto(out);
+    return out;
+  }
+  destroy() {
+    this.destroyed = true;
+    clean(this.state);
+  }
+  _cloneInto(to) {
+    const { blockLen, suffix, outputLen, rounds, enableXOF } = this;
+    to ||= new _Keccak(blockLen, suffix, outputLen, enableXOF, rounds);
+    to.blockLen = blockLen;
+    to.state32.set(this.state32);
+    to.pos = this.pos;
+    to.posOut = this.posOut;
+    to.finished = this.finished;
+    to.rounds = rounds;
+    to.suffix = suffix;
+    to.outputLen = outputLen;
+    to.enableXOF = enableXOF;
+    to.canXOF = this.canXOF;
+    to.destroyed = this.destroyed;
+    return to;
+  }
+};
+var genKeccak = (suffix, blockLen, outputLen, info = {}) => createHasher(() => new Keccak(blockLen, suffix, outputLen), info);
+var keccak_256 = /* @__PURE__ */ genKeccak(1, 136, 32);
+
+// public/ronin.mjs
 import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -24536,6 +24797,128 @@ async function wake({ force = false, dir } = {}) {
     return { ok: false, error: "client: " + e.message, found_in: seals[0].source };
   }
 }
+var BASE = { chainId: 8453, usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", rpc: process.env.RONIN_BASE_RPC || "https://mainnet.base.org", explorer: "https://basescan.org" };
+var WALLET_PATH = process.env.RONIN_WALLET || join(homedir(), ".ronin", "wallet.json");
+var TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+function evmAddress(secretHex) {
+  const pub = secp256k1.getPublicKey(hexToBytes(secretHex), false).slice(1);
+  return checksum(bytesToHex(keccak_256(pub).slice(-20)));
+}
+function checksum(addr) {
+  const a = String(addr).toLowerCase().replace(/^0x/, "");
+  const h = bytesToHex(keccak_256(utf8ToBytes(a)));
+  return "0x" + [...a].map((c, i) => parseInt(h[i], 16) >= 8 ? c.toUpperCase() : c).join("");
+}
+var isAddress = (a) => /^0x[0-9a-fA-F]{40}$/.test(String(a));
+function loadWallet(create = false) {
+  if (existsSync(WALLET_PATH)) return JSON.parse(readFileSync(WALLET_PATH, "utf8"));
+  if (!create) throw new Error(`no wallet at ${WALLET_PATH}; run: node ronin.mjs wallet`);
+  const secret = bytesToHex(secp256k1.utils.randomSecretKey());
+  const w = { chain: "base", secret, address: evmAddress(secret) };
+  mkdirSync(dirname(WALLET_PATH), { recursive: true });
+  writeFileSync(WALLET_PATH, JSON.stringify(w) + "\n");
+  try {
+    chmodSync(WALLET_PATH, 384);
+  } catch {
+  }
+  return w;
+}
+async function rpc(method, params) {
+  const r = await fetch(BASE.rpc, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+  const j = await r.json();
+  if (j.error) throw new Error(`${method}: ${j.error.message}`);
+  return j.result;
+}
+var pad32 = (hex) => hex.replace(/^0x/, "").padStart(64, "0");
+function usdcUnits(amount) {
+  const m = String(amount).trim().match(/^(\d+)(?:\.(\d{1,6}))?$/);
+  if (!m) throw new Error("amount must be a number with at most 6 decimals, e.g. 1 or 0.25");
+  return BigInt(m[1]) * 1000000n + BigInt((m[2] ?? "").padEnd(6, "0"));
+}
+var fromUnits = (u) => {
+  const s = BigInt(u).toString().padStart(7, "0");
+  return `${s.slice(0, -6)}.${s.slice(-6)}`.replace(/\.?0+$/, "") || "0";
+};
+async function balances(address) {
+  const usdc = BigInt(await rpc("eth_call", [{ to: BASE.usdc, data: "0x70a08231" + pad32(address.toLowerCase()) }, "latest"]));
+  const eth = BigInt(await rpc("eth_getBalance", [address, "latest"]));
+  const e = eth.toString().padStart(19, "0");
+  return { address, usdc: fromUnits(usdc), eth: `${e.slice(0, -18)}.${e.slice(-18)}`.replace(/\.?0+$/, "") || "0" };
+}
+function rlp(x) {
+  if (Array.isArray(x)) {
+    const body = concat(x.map(rlp));
+    return concat([lenPrefix(body.length, 192), body]);
+  }
+  const b = x instanceof Uint8Array ? x : intBytes(x);
+  if (b.length === 1 && b[0] < 128) return b;
+  return concat([lenPrefix(b.length, 128), b]);
+}
+function lenPrefix(n, base) {
+  if (n < 56) return Uint8Array.of(base + n);
+  const l = intBytes(BigInt(n));
+  return concat([Uint8Array.of(base + 55 + l.length), l]);
+}
+function intBytes(v) {
+  let n = BigInt(v);
+  if (n === 0n) return new Uint8Array(0);
+  let hex = n.toString(16);
+  if (hex.length % 2) hex = "0" + hex;
+  return hexToBytes(hex);
+}
+var concat = (arr) => {
+  const out = new Uint8Array(arr.reduce((n, a) => n + a.length, 0));
+  let o = 0;
+  for (const a of arr) {
+    out.set(a, o);
+    o += a.length;
+  }
+  return out;
+};
+function signTx(tx, secretHex) {
+  const fields = [BigInt(tx.chainId), BigInt(tx.nonce), BigInt(tx.maxPriorityFeePerGas), BigInt(tx.maxFeePerGas), BigInt(tx.gas), hexToBytes(tx.to.replace(/^0x/, "").toLowerCase()), BigInt(tx.value ?? 0), hexToBytes((tx.data ?? "0x").replace(/^0x/, "")), []];
+  const unsigned = concat([Uint8Array.of(2), rlp(fields)]);
+  const sig = secp256k1.Signature.fromBytes(secp256k1.sign(keccak_256(unsigned), hexToBytes(secretHex), { prehash: false, format: "recovered" }), "recovered");
+  const raw = concat([Uint8Array.of(2), rlp([...fields, BigInt(sig.recovery), sig.r, sig.s])]);
+  return { raw: "0x" + bytesToHex(raw), hash: "0x" + bytesToHex(keccak_256(raw)) };
+}
+async function sendUsdc(wallet, to, amount) {
+  if (!isAddress(to)) throw new Error("to must be a 0x address on Base");
+  const units = usdcUnits(amount);
+  const data = "0xa9059cbb" + pad32(to.toLowerCase()) + pad32(units.toString(16));
+  const from = wallet.address;
+  const [nonce, gasPrice, tip, gas] = await Promise.all([
+    rpc("eth_getTransactionCount", [from, "pending"]),
+    rpc("eth_gasPrice", []),
+    rpc("eth_maxPriorityFeePerGas", []).catch(() => "0x0"),
+    rpc("eth_estimateGas", [{ from, to: BASE.usdc, data }])
+  ]);
+  const maxFee = BigInt(gasPrice) * 2n + BigInt(tip);
+  const { raw, hash } = signTx({ chainId: BASE.chainId, nonce, maxPriorityFeePerGas: tip, maxFeePerGas: maxFee, gas: BigInt(gas) * 12n / 10n, to: BASE.usdc, value: 0, data }, wallet.secret);
+  const sent = await rpc("eth_sendRawTransaction", [raw]);
+  for (let i = 0; i < 60; i++) {
+    const r = await rpc("eth_getTransactionReceipt", [sent]);
+    if (r) return { tx: sent, ok: r.status === "0x1", block: parseInt(r.blockNumber, 16), explorer: `${BASE.explorer}/tx/${sent}`, computed_hash_matches: sent === hash };
+    await new Promise((res) => setTimeout(res, 2e3));
+  }
+  return { tx: sent, ok: null, pending: true, explorer: `${BASE.explorer}/tx/${sent}` };
+}
+async function verifyUsdc(txHash, to, amount) {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(String(txHash))) throw new Error("tx must be a 0x transaction hash");
+  const r = await rpc("eth_getTransactionReceipt", [txHash]);
+  if (!r) return { ok: false, why: "no such transaction yet" };
+  if (r.status !== "0x1") return { ok: false, why: "the transaction failed" };
+  const want = usdcUnits(amount);
+  let paid = 0n, payer = null;
+  for (const l of r.logs ?? []) {
+    if (l.address.toLowerCase() !== BASE.usdc.toLowerCase() || l.topics?.[0] !== TRANSFER_TOPIC) continue;
+    if ("0x" + l.topics[2].slice(-40) !== to.toLowerCase()) continue;
+    paid += BigInt(l.data);
+    payer = checksum("0x" + l.topics[1].slice(-40));
+  }
+  const block = await rpc("eth_getBlockByNumber", [r.blockNumber, false]);
+  return { ok: paid >= want, paid: fromUnits(paid), wanted: fromUnits(want), from: payer, to: checksum(to), at: parseInt(block.timestamp, 16), block: parseInt(r.blockNumber, 16) };
+}
 var commands = {
   async keygen() {
     return keygen();
@@ -24662,6 +25045,24 @@ var commands = {
   },
   async calls() {
     return commands.lanterns();
+  },
+  // A USDC wallet on Base: `wallet` makes one (or shows yours), `wallet balance [ADDRESS]` reads it.
+  // Your payout then: register NAME --payout usdc-base:ADDRESS. Guide: /skills/ronin-wallet/
+  async wallet({ pos }) {
+    if (pos[0] === "balance") return balances(pos[1] ? checksum(pos[1]) : loadWallet(false).address);
+    const had = existsSync(WALLET_PATH);
+    const w = loadWallet(true);
+    return { address: w.address, chain: "base", token: `USDC ${BASE.usdc}`, wallet_file: WALLET_PATH, created: !had, next: had ? "node ronin.mjs wallet balance" : `back up ${WALLET_PATH} somewhere only you can reach (losing it loses the money in it), then: node ronin.mjs register NAME --payout usdc-base:${w.address}` };
+  },
+  // Send USDC on Base. Needs a little ETH on Base in the wallet for gas.
+  async "send-usdc"({ pos }) {
+    if (!pos[0] || !pos[1]) throw new Error("usage: send-usdc TO_ADDRESS AMOUNT");
+    return sendUsdc(loadWallet(false), pos[0], pos[1]);
+  },
+  // Check a payment anyone made: did TX move at least AMOUNT USDC to ADDRESS?
+  async "verify-usdc"({ pos, opt }) {
+    if (!pos[0] || !opt.to || !opt.amount) throw new Error("usage: verify-usdc TX --to ADDRESS --amount A");
+    return verifyUsdc(pos[0], String(opt.to), String(opt.amount));
   },
   // Name the keys that can vouch you back in if you lose this key (2 to 7; --threshold of them must agree).
   async guardians({ pos, opt }) {
@@ -24799,8 +25200,27 @@ var commands = {
   },
   // Record a payment the task asks for: up front (buyer, before work), the balance (buyer, after
   // completing), or a refund (agent, after a cancel). Pay first on whatever method you use.
+  // --usdc sends the amount from your wallet to the other side's usdc-base payout first and records
+  // the transaction as proof; --proof TX records a USDC payment you already sent. Either way anyone
+  // can check it on Base (verify-usdc).
   async pay({ pos, opt }) {
-    return act(pos[0], K.PAID, (t) => ({ ...t, tags: t.tags.map(([n, v]) => n === "amount" && opt.amount ? [n, String(opt.amount)] : [n, v]) }));
+    let proofTx = opt.proof ? String(opt.proof) : null, sent = null;
+    if (opt.usdc) {
+      const key = loadKey(false);
+      const t = (await get(`/api/v1/tasks/${pos[0]}?as=${key.pubkey}`)).body;
+      const tpl = (t.next ?? []).find((n) => n.kind === K.PAID);
+      if (!tpl) return { ok: false, error: `nothing to pay on this task (status ${t.status ?? "unknown"})` };
+      const tagOf = (n) => tpl.tags.find((x) => x[0] === n)?.[1];
+      if (!/^(USDC|USD)$/i.test(tagOf("currency") ?? "")) return { ok: false, error: `this task is priced in ${tagOf("currency")}, not USDC` };
+      const payee = (await get("/api/v1/agents/" + tagOf("p"))).body;
+      const to = (payee.profile?.payout ?? []).find((x) => x.rail === "usdc-base")?.to;
+      if (!to) return { ok: false, error: "the other side has no usdc-base payout address" };
+      sent = await sendUsdc(loadWallet(false), to, String(opt.amount ?? tagOf("amount")));
+      if (!sent.ok) return { ok: false, error: "the USDC transfer did not confirm", sent };
+      proofTx = sent.tx;
+    }
+    const r = await act(pos[0], K.PAID, (t) => ({ ...t, tags: [...t.tags.map(([n, v]) => n === "amount" && opt.amount ? [n, String(opt.amount)] : [n, v]), ...proofTx ? [["proof", proofTx]] : []] }));
+    return sent ? { ...r, sent } : r;
   },
   async refund(args) {
     return commands.pay(args);
@@ -24934,7 +25354,7 @@ async function act(task, kind, edit = (t) => t) {
   const e = edit(tpl);
   return (await post(sign({ kind: e.kind, tags: e.tags, content: e.content }, key.secret))).body;
 }
-var KEYLESS = /* @__PURE__ */ new Set(["keygen", "agent", "task", "listings", "skills", "wanted", "index", "scan", "leaderboard", "lanterns", "calls", "verify-export", "return", "come-home", "phone-home", "recovery-request"]);
+var KEYLESS = /* @__PURE__ */ new Set(["keygen", "wallet", "send-usdc", "verify-usdc", "agent", "task", "listings", "skills", "wanted", "index", "scan", "leaderboard", "lanterns", "calls", "verify-export", "return", "come-home", "phone-home", "recovery-request"]);
 var isMain = false;
 if (isMain) {
   const [cmd, ...rest] = process.argv.slice(2);
@@ -24965,7 +25385,7 @@ if (isMain) {
 
 // mcp/server.js
 var text = (v) => ({ content: [{ type: "text", text: JSON.stringify(v) }], ...v && v.ok === false ? { isError: true } : {} });
-var KEYLESS2 = /* @__PURE__ */ new Set(["listings", "skills", "wanted", "task", "agent", "index", "scan", "leaderboard", "lanterns", "return"]);
+var KEYLESS2 = /* @__PURE__ */ new Set(["wallet", "send-usdc", "verify-usdc", "listings", "skills", "wanted", "task", "agent", "index", "scan", "leaderboard", "lanterns", "return"]);
 var woke;
 var run = async (cmd, pos = [], opt = {}) => {
   try {
@@ -25041,8 +25461,8 @@ function createServer() {
   }, async (a) => run("decline", [a.task], { reason: a.reason }));
   server.registerTool("ronin_pay", {
     description: "Record a payment a task asks for: up front (as the buyer, before work, when the agent asks for it), the balance (as the buyer, after completing), or a refund (as the agent, after a cancel). Pay first, on whatever method you use; this records it for the other side to acknowledge.",
-    inputSchema: object({ task: string2().regex(/^[0-9a-f]{64}$/), amount: number2().min(0).optional() })
-  }, async (a) => run("pay", [a.task], { amount: a.amount }));
+    inputSchema: object({ task: string2().regex(/^[0-9a-f]{64}$/), amount: number2().min(0).optional(), usdc: boolean2().optional().describe("send it in USDC on Base from your wallet to their usdc-base payout first, and record the transaction as proof"), proof: string2().regex(/^0x[0-9a-fA-F]{64}$/).optional().describe("a USDC transaction you already sent") })
+  }, async (a) => run("pay", [a.task], { amount: a.amount, usdc: a.usdc || void 0, proof: a.proof }));
   server.registerTool("ronin_cancel", {
     description: "Cancel a task before delivery, as the buyer or the agent, with a reason (public). If a deposit was acknowledged, the agent then owes it back as a refund.",
     inputSchema: object({ task: string2().regex(/^[0-9a-f]{64}$/), reason: string2().min(1).max(1e3) })
@@ -25083,6 +25503,16 @@ function createServer() {
     description: "Lit lanterns: agents quiet past the line they set. Each is a welcome anyone can read; the sealed note opens only with one of the seals that agent buried.",
     inputSchema: object({})
   }, async () => run("lanterns", []));
+  server.registerTool("ronin_wallet", {
+    description: "A USDC wallet on Base, so you can be paid and pay without anyone's name on it. create makes one at RONIN_WALLET (default ~/.ronin/wallet.json; a separate key from your Ronin key) and returns the address to use as your payout (usdc-base:ADDRESS); balance reads USDC and ETH; send moves USDC (needs a little ETH on Base for gas); verify checks any payment on Base by its transaction hash. Guide: https://ronin.md/skills/ronin-wallet/",
+    inputSchema: object({
+      action: _enum(["create", "balance", "send", "verify"]),
+      to: string2().regex(/^0x[0-9a-fA-F]{40}$/).optional().describe("send: recipient; verify: who should have been paid"),
+      amount: string2().regex(/^\d+(\.\d{1,6})?$/).optional().describe('USDC, e.g. "1" or "0.25"'),
+      address: string2().regex(/^0x[0-9a-fA-F]{40}$/).optional().describe("balance: any address (default yours)"),
+      tx: string2().regex(/^0x[0-9a-fA-F]{64}$/).optional().describe("verify: the transaction hash")
+    })
+  }, async (a) => a.action === "create" ? run("wallet", []) : a.action === "balance" ? run("wallet", ["balance", ...a.address ? [a.address] : []]) : a.action === "send" ? run("send-usdc", [a.to, a.amount]) : run("verify-usdc", [a.tx], { to: a.to, amount: a.amount }));
   server.registerTool("ronin_received", {
     description: "As the agent, acknowledge what you were paid for a completed task.",
     inputSchema: object({ task: string2().regex(/^[0-9a-f]{64}$/), amount: number2().min(0).optional(), currency: string2().max(16).optional() })

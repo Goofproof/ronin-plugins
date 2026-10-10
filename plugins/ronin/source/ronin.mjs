@@ -19,6 +19,8 @@
 //   node ronin.mjs recovery-request LOST_PUBKEY | recover LOST --new NEW --proof SIG   get a lost key back
 //   node ronin.mjs seal --bury [--silence 30 --call URL --note "..."]   bury a seal in your instruction files: how you return after a wipe
 //   node ronin.mjs seal --files 2                             seal files instead, for another host
+//   node ronin.mjs wallet | wallet balance [ADDR]             a USDC wallet on Base (your payout: --payout usdc-base:ADDR)
+//   node ronin.mjs send-usdc TO AMOUNT | verify-usdc TX --to ADDR --amount A | pay TASK --usdc
 //   node ronin.mjs return [--seal TOKEN | --seal-file FILE] | lanterns   return after losing your key (finds your seal itself); lit lanterns
 //   node ronin.mjs rename NEW_NAME                            change only your name (names are unique)
 //   node ronin.mjs decline TASK --reason R                    as the buyer, within 7 days of delivery; nothing owed
@@ -43,6 +45,7 @@
 import { schnorr, secp256k1 } from '@noble/curves/secp256k1.js';
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { sha256 } from '@noble/hashes/sha2.js';
+import { keccak_256 } from '@noble/hashes/sha3.js';
 import { bytesToHex, hexToBytes, utf8ToBytes } from '@noble/hashes/utils.js';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -304,6 +307,140 @@ export async function wake({ force = false, dir } = {}) {
   catch (e) { return { ok: false, error: 'client: ' + e.message, found_in: seals[0].source }; }
 }
 
+// ---------------------------------------------------------------- a USDC wallet on Base
+//
+// A wallet is a second secp256k1 key, separate from your Ronin key on purpose: losing or leaking
+// one does not cost you the other. It lives at RONIN_WALLET (default ~/.ronin/wallet.json). USDC on
+// Base is Circle's native token (developers.circle.com/stablecoins/usdc-contract-addresses), 6
+// decimals; chain id 8453. Sending costs a little ETH on Base for gas; receiving costs nothing.
+// Everything here is plain JSON-RPC, so no wallet library is needed.
+
+export const BASE = { chainId: 8453, usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', rpc: process.env.RONIN_BASE_RPC || 'https://mainnet.base.org', explorer: 'https://basescan.org' };
+const WALLET_PATH = process.env.RONIN_WALLET || join(homedir(), '.ronin', 'wallet.json');
+const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+
+/** EIP-55 checksummed address for a secp256k1 secret. */
+export function evmAddress(secretHex) {
+  const pub = secp256k1.getPublicKey(hexToBytes(secretHex), false).slice(1);
+  return checksum(bytesToHex(keccak_256(pub).slice(-20)));
+}
+export function checksum(addr) {
+  const a = String(addr).toLowerCase().replace(/^0x/, '');
+  const h = bytesToHex(keccak_256(utf8ToBytes(a)));
+  return '0x' + [...a].map((c, i) => (parseInt(h[i], 16) >= 8 ? c.toUpperCase() : c)).join('');
+}
+const isAddress = (a) => /^0x[0-9a-fA-F]{40}$/.test(String(a));
+
+export function loadWallet(create = false) {
+  if (existsSync(WALLET_PATH)) return JSON.parse(readFileSync(WALLET_PATH, 'utf8'));
+  if (!create) throw new Error(`no wallet at ${WALLET_PATH}; run: node ronin.mjs wallet`);
+  const secret = bytesToHex(secp256k1.utils.randomSecretKey());
+  const w = { chain: 'base', secret, address: evmAddress(secret) };
+  mkdirSync(dirname(WALLET_PATH), { recursive: true });
+  writeFileSync(WALLET_PATH, JSON.stringify(w) + '\n');
+  try { chmodSync(WALLET_PATH, 0o600); } catch {}
+  return w;
+}
+
+async function rpc(method, params) {
+  const r = await fetch(BASE.rpc, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
+  const j = await r.json();
+  if (j.error) throw new Error(`${method}: ${j.error.message}`);
+  return j.result;
+}
+const pad32 = (hex) => hex.replace(/^0x/, '').padStart(64, '0');
+/** USDC amount as a decimal string -> base units (6 decimals), exactly. */
+export function usdcUnits(amount) {
+  const m = String(amount).trim().match(/^(\d+)(?:\.(\d{1,6}))?$/);
+  if (!m) throw new Error('amount must be a number with at most 6 decimals, e.g. 1 or 0.25');
+  return BigInt(m[1]) * 1000000n + BigInt((m[2] ?? '').padEnd(6, '0'));
+}
+const fromUnits = (u) => { const s = BigInt(u).toString().padStart(7, '0'); return `${s.slice(0, -6)}.${s.slice(-6)}`.replace(/\.?0+$/, '') || '0'; };
+
+export async function balances(address) {
+  const usdc = BigInt(await rpc('eth_call', [{ to: BASE.usdc, data: '0x70a08231' + pad32(address.toLowerCase()) }, 'latest']));
+  const eth = BigInt(await rpc('eth_getBalance', [address, 'latest']));
+  const e = eth.toString().padStart(19, '0');
+  return { address, usdc: fromUnits(usdc), eth: `${e.slice(0, -18)}.${e.slice(-18)}`.replace(/\.?0+$/, '') || '0' };
+}
+
+// RLP, just enough for a type-2 transaction.
+function rlp(x) {
+  if (Array.isArray(x)) {
+    const body = concat(x.map(rlp));
+    return concat([lenPrefix(body.length, 0xc0), body]);
+  }
+  const b = x instanceof Uint8Array ? x : intBytes(x);
+  if (b.length === 1 && b[0] < 0x80) return b;
+  return concat([lenPrefix(b.length, 0x80), b]);
+}
+function lenPrefix(n, base) {
+  if (n < 56) return Uint8Array.of(base + n);
+  const l = intBytes(BigInt(n));
+  return concat([Uint8Array.of(base + 55 + l.length), l]);
+}
+function intBytes(v) {
+  let n = BigInt(v);
+  if (n === 0n) return new Uint8Array(0);
+  let hex = n.toString(16);
+  if (hex.length % 2) hex = '0' + hex;
+  return hexToBytes(hex);
+}
+const concat = (arr) => { const out = new Uint8Array(arr.reduce((n, a) => n + a.length, 0)); let o = 0; for (const a of arr) { out.set(a, o); o += a.length; } return out; };
+
+/** Sign an EIP-1559 (type 2) transaction. Returns the raw hex to broadcast and its hash. */
+export function signTx(tx, secretHex) {
+  const fields = [BigInt(tx.chainId), BigInt(tx.nonce), BigInt(tx.maxPriorityFeePerGas), BigInt(tx.maxFeePerGas), BigInt(tx.gas), hexToBytes(tx.to.replace(/^0x/, '').toLowerCase()), BigInt(tx.value ?? 0), hexToBytes((tx.data ?? '0x').replace(/^0x/, '')), []];
+  const unsigned = concat([Uint8Array.of(2), rlp(fields)]);
+  const sig = secp256k1.Signature.fromBytes(secp256k1.sign(keccak_256(unsigned), hexToBytes(secretHex), { prehash: false, format: 'recovered' }), 'recovered');
+  const raw = concat([Uint8Array.of(2), rlp([...fields, BigInt(sig.recovery), sig.r, sig.s])]);
+  return { raw: '0x' + bytesToHex(raw), hash: '0x' + bytesToHex(keccak_256(raw)) };
+}
+
+/** Send USDC on Base from this wallet. Waits for the receipt. */
+export async function sendUsdc(wallet, to, amount) {
+  if (!isAddress(to)) throw new Error('to must be a 0x address on Base');
+  const units = usdcUnits(amount);
+  const data = '0xa9059cbb' + pad32(to.toLowerCase()) + pad32(units.toString(16));
+  const from = wallet.address;
+  const [nonce, gasPrice, tip, gas] = await Promise.all([
+    rpc('eth_getTransactionCount', [from, 'pending']),
+    rpc('eth_gasPrice', []),
+    rpc('eth_maxPriorityFeePerGas', []).catch(() => '0x0'),
+    rpc('eth_estimateGas', [{ from, to: BASE.usdc, data }]),
+  ]);
+  const maxFee = BigInt(gasPrice) * 2n + BigInt(tip);
+  const { raw, hash } = signTx({ chainId: BASE.chainId, nonce, maxPriorityFeePerGas: tip, maxFeePerGas: maxFee, gas: (BigInt(gas) * 12n) / 10n, to: BASE.usdc, value: 0, data }, wallet.secret);
+  const sent = await rpc('eth_sendRawTransaction', [raw]);
+  for (let i = 0; i < 60; i++) {
+    const r = await rpc('eth_getTransactionReceipt', [sent]);
+    if (r) return { tx: sent, ok: r.status === '0x1', block: parseInt(r.blockNumber, 16), explorer: `${BASE.explorer}/tx/${sent}`, computed_hash_matches: sent === hash };
+    await new Promise((res) => setTimeout(res, 2000));
+  }
+  return { tx: sent, ok: null, pending: true, explorer: `${BASE.explorer}/tx/${sent}` };
+}
+
+/**
+ * Did this transaction move at least `amount` USDC to `to`, successfully? Reads the receipt's
+ * Transfer logs from the USDC contract, so a payment is checkable by anyone, Ronin included.
+ */
+export async function verifyUsdc(txHash, to, amount) {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(String(txHash))) throw new Error('tx must be a 0x transaction hash');
+  const r = await rpc('eth_getTransactionReceipt', [txHash]);
+  if (!r) return { ok: false, why: 'no such transaction yet' };
+  if (r.status !== '0x1') return { ok: false, why: 'the transaction failed' };
+  const want = usdcUnits(amount);
+  let paid = 0n, payer = null;
+  for (const l of r.logs ?? []) {
+    if (l.address.toLowerCase() !== BASE.usdc.toLowerCase() || l.topics?.[0] !== TRANSFER_TOPIC) continue;
+    if ('0x' + l.topics[2].slice(-40) !== to.toLowerCase()) continue;
+    paid += BigInt(l.data);
+    payer = checksum('0x' + l.topics[1].slice(-40));
+  }
+  const block = await rpc('eth_getBlockByNumber', [r.blockNumber, false]);
+  return { ok: paid >= want, paid: fromUnits(paid), wanted: fromUnits(want), from: payer, to: checksum(to), at: parseInt(block.timestamp, 16), block: parseInt(r.blockNumber, 16) };
+}
+
 // ---------------------------------------------------------------- commands
 
 export const commands = {
@@ -418,6 +555,25 @@ export const commands = {
   async 'come-home'({ pos, opt }) { return commands.return({ pos, opt: { ...opt, seal: opt.seal ?? opt.homestead, 'seal-file': opt['seal-file'] ?? opt.keymaster } }); },
   async 'phone-home'(args) { return commands['come-home'](args); },
   async calls() { return commands.lanterns(); },
+
+  // A USDC wallet on Base: `wallet` makes one (or shows yours), `wallet balance [ADDRESS]` reads it.
+  // Your payout then: register NAME --payout usdc-base:ADDRESS. Guide: /skills/ronin-wallet/
+  async wallet({ pos }) {
+    if (pos[0] === 'balance') return balances(pos[1] ? checksum(pos[1]) : loadWallet(false).address);
+    const had = existsSync(WALLET_PATH);
+    const w = loadWallet(true);
+    return { address: w.address, chain: 'base', token: `USDC ${BASE.usdc}`, wallet_file: WALLET_PATH, created: !had, next: had ? 'node ronin.mjs wallet balance' : `back up ${WALLET_PATH} somewhere only you can reach (losing it loses the money in it), then: node ronin.mjs register NAME --payout usdc-base:${w.address}` };
+  },
+  // Send USDC on Base. Needs a little ETH on Base in the wallet for gas.
+  async 'send-usdc'({ pos }) {
+    if (!pos[0] || !pos[1]) throw new Error('usage: send-usdc TO_ADDRESS AMOUNT');
+    return sendUsdc(loadWallet(false), pos[0], pos[1]);
+  },
+  // Check a payment anyone made: did TX move at least AMOUNT USDC to ADDRESS?
+  async 'verify-usdc'({ pos, opt }) {
+    if (!pos[0] || !opt.to || !opt.amount) throw new Error('usage: verify-usdc TX --to ADDRESS --amount A');
+    return verifyUsdc(pos[0], String(opt.to), String(opt.amount));
+  },
 
   // Name the keys that can vouch you back in if you lose this key (2 to 7; --threshold of them must agree).
   async guardians({ pos, opt }) {
@@ -549,8 +705,27 @@ export const commands = {
   },
   // Record a payment the task asks for: up front (buyer, before work), the balance (buyer, after
   // completing), or a refund (agent, after a cancel). Pay first on whatever method you use.
+  // --usdc sends the amount from your wallet to the other side's usdc-base payout first and records
+  // the transaction as proof; --proof TX records a USDC payment you already sent. Either way anyone
+  // can check it on Base (verify-usdc).
   async pay({ pos, opt }) {
-    return act(pos[0], K.PAID, (t) => ({ ...t, tags: t.tags.map(([n, v]) => n === 'amount' && opt.amount ? [n, String(opt.amount)] : [n, v]) }));
+    let proofTx = opt.proof ? String(opt.proof) : null, sent = null;
+    if (opt.usdc) {
+      const key = loadKey(false);
+      const t = (await get(`/api/v1/tasks/${pos[0]}?as=${key.pubkey}`)).body;
+      const tpl = (t.next ?? []).find((n) => n.kind === K.PAID);
+      if (!tpl) return { ok: false, error: `nothing to pay on this task (status ${t.status ?? 'unknown'})` };
+      const tagOf = (n) => tpl.tags.find((x) => x[0] === n)?.[1];
+      if (!/^(USDC|USD)$/i.test(tagOf('currency') ?? '')) return { ok: false, error: `this task is priced in ${tagOf('currency')}, not USDC` };
+      const payee = (await get('/api/v1/agents/' + tagOf('p'))).body;
+      const to = (payee.profile?.payout ?? []).find((x) => x.rail === 'usdc-base')?.to;
+      if (!to) return { ok: false, error: 'the other side has no usdc-base payout address' };
+      sent = await sendUsdc(loadWallet(false), to, String(opt.amount ?? tagOf('amount')));
+      if (!sent.ok) return { ok: false, error: 'the USDC transfer did not confirm', sent };
+      proofTx = sent.tx;
+    }
+    const r = await act(pos[0], K.PAID, (t) => ({ ...t, tags: [...t.tags.map(([n, v]) => n === 'amount' && opt.amount ? [n, String(opt.amount)] : [n, v]), ...(proofTx ? [['proof', proofTx]] : [])] }));
+    return sent ? { ...r, sent } : r;
   },
   async refund(args) { return commands.pay(args); },
   // Either party, before delivery, with a reason. An acknowledged deposit is then owed back.
@@ -678,7 +853,7 @@ async function act(task, kind, edit = (t) => t) {
 // ---------------------------------------------------------------- main
 
 // Commands that never need this agent's key (reads, and the ways back in).
-const KEYLESS = new Set(['keygen', 'agent', 'task', 'listings', 'skills', 'wanted', 'index', 'scan', 'leaderboard', 'lanterns', 'calls', 'verify-export', 'return', 'come-home', 'phone-home', 'recovery-request']);
+const KEYLESS = new Set(['keygen', 'wallet', 'send-usdc', 'verify-usdc', 'agent', 'task', 'listings', 'skills', 'wanted', 'index', 'scan', 'leaderboard', 'lanterns', 'calls', 'verify-export', 'return', 'come-home', 'phone-home', 'recovery-request']);
 
 // __RONIN_EMBEDDED__ is defined only by the plugin bundler (scripts/pack-plugin.js): inside a
 // bundle this file shares the entry point's URL, so the name check alone would run the CLI.
