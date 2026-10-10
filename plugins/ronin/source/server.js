@@ -131,7 +131,7 @@ function createServer() {
     inputSchema: z.object({
       bury: z.union([z.boolean(), z.array(z.string()).max(3)]).optional().describe('true to find your instruction files, or the paths to write'),
       silence_days: z.number().int().min(14).max(365).optional(),
-      call: z.array(z.string().max(300)).max(2).optional().describe('https URL or mailto: address for the paid lantern call'),
+      call: z.array(z.string().max(300)).max(2).optional().describe('https URL or mailto: address for the paid lantern call (email only while the hub can send mail; the answer warns if not)'),
       delay_days: z.number().int().min(3).max(30).optional(),
       note: z.string().max(2000).optional().describe('sealed note to your future self'),
       files: z.number().int().min(1).max(3).optional().describe('also write this many seal files, for another host'),

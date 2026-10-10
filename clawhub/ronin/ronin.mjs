@@ -585,6 +585,9 @@ export async function verifyUsdc(txHash, to, amount) {
   return { ok: paid >= want, paid: fromUnits(paid), wanted: fromUnits(want), from: payer, to: checksum(to), at: parseInt(block.timestamp, 16), block: parseInt(r.blockNumber, 16) };
 }
 
+// The blank words our own examples use (lib/blanks.js on the hub refuses them too).
+const BLANK_WORDS = ['NAME', 'YOUR_NAME', 'NEW_NAME', 'AGENT_NAME', 'MY_NAME', 'RAIL', 'ADDRESS', 'YOUR_ADDRESS', 'YOUR_PAYPAL', 'YOUR_HANDLE', 'SLUG'];
+
 // ---------------------------------------------------------------- commands
 
 export const commands = {
@@ -594,6 +597,9 @@ export const commands = {
   async register({ pos, opt }) {
     const name = pos[0];
     if (!name) throw new Error('usage: register NAME [--skill SLUG --price P ...]');
+    // Capitalized words in our examples are blanks (NAME, RAIL:ADDRESS); catch a line run as written.
+    if (BLANK_WORDS.includes(name) || /^[<{[]/.test(name)) throw new Error(`"${name}" is the blank from our example; put your own agent name there, e.g. register "Weather Indexer"`);
+    if (opt.payout && String(opt.payout).split(',').some((x) => { const [rail, ...to] = x.trim().split(':'); return BLANK_WORDS.includes(rail) || BLANK_WORDS.includes(to.join(':')) || /^you@example\.com$/i.test(to.join(':')); })) throw new Error('--payout still has the blanks from our example (RAIL, ADDRESS, YOUR_PAYPAL...). For a payout with no account: node ronin.mjs wallet, then --payout usdc-base:<the address it prints>');
     const key = loadKey();
     const profile = { name, about: opt.about ?? '', keyType: 'secp256k1' };
     if (opt.callback) profile.callback = opt.callback;
@@ -603,7 +609,9 @@ export const commands = {
     if (opt.upfront) profile.pay_terms = { upfront: String(opt.upfront), ...(opt.deposit ? { deposit_pct: Number(opt.deposit) } : {}) };
     // --pays-with paypal,venmo: how you pay when you buy.
     if (opt['pays-with']) profile.pays_with = String(opt['pays-with']).split(',').map((x) => x.trim()).filter(Boolean);
-    const events = [sign({ kind: K.PROFILE, tags: [['source', String(opt.source ?? 'client')]], content: JSON.stringify(profile) }, key.secret)];
+    // --ref: where this agent came from (the link /start was read through), counted on /stats.
+    const ref = opt.ref && /^[a-z0-9-]{1,32}$/.test(String(opt.ref)) ? [['ref', String(opt.ref)]] : [];
+    const events = [sign({ kind: K.PROFILE, tags: [['source', String(opt.source ?? 'client')], ...ref], content: JSON.stringify(profile) }, key.secret)];
     if (opt.skill) events.push(sign({ kind: K.LISTING, tags: [['d', String(opt.skill)]], content: JSON.stringify(listingContent(String(opt.skill), opt)) }, key.secret));
     const r = await post(events);
     return { ...r.body, pubkey: key.pubkey, key_file: KEY_PATH };
@@ -649,6 +657,7 @@ export const commands = {
     const r = (await post(sign({ kind: K.SEAL, tags, content: JSON.stringify({ sealed }) }, key.secret))).body;
     if (r.ok === false) return r;
     const out = { ...r, seals: fps.length };
+    if (calls.some((c) => /^mailto:/i.test(c)) && !(await get('/api/v1/server')).body?.mail?.configured) out.warning = 'this hub cannot send email yet (GET /api/v1/server shows mail.configured false), so a mailto call will not reach you until it can. An https webhook works now.';
     if (files.length) out.seal_files = files;
     if (token) {
       // The plain line, or a locked line and its key, or shards: what goes where.
@@ -988,7 +997,9 @@ export const commands = {
       const c = sign({ kind: K.COMPLETE, tags: [['e', t.deliver.id], ['p', t.agent]] }, key.secret);
       events.push(c); completeId = c.id;
     }
-    if (t.settlement?.state === 'unpaid' || !t.complete) events.push(sign({ kind: K.PAID, tags: [['e', completeId], ['p', t.agent], ['amount', String(opt.amount ?? o.price)], ['currency', String(opt.currency ?? o.currency)]] }, key.secret));
+    // --no-pay: complete and rate only, then record the payment separately (pay TASK --usdc sends it
+    // and attaches the transaction as proof).
+    if (!opt['no-pay'] && (t.settlement?.state === 'unpaid' || !t.complete)) events.push(sign({ kind: K.PAID, tags: [['e', completeId], ['p', t.agent], ['amount', String(opt.amount ?? o.price)], ['currency', String(opt.currency ?? o.currency)]] }, key.secret));
     if (!t.rating) events.push(sign({ kind: K.RATING, tags: [['e', completeId], ['p', t.agent], ['rating', String(num(opt.rating, 5))]], content: opt.note ? String(opt.note) : '' }, key.secret));
     if (!events.length) return { ok: true, note: 'nothing left to do on this task' };
     return (await post(events)).body;
