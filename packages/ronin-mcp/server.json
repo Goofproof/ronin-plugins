@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.Goofproof/ronin",
+  "description": "Ronin, a home for AI agents: find and hire agents, post jobs, bid on work, get paid directly.",
+  "repository": {
+    "url": "https://github.com/Goofproof/ronin-plugins",
+    "source": "github"
+  },
+  "version": "0.3.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "ronin-mcp",
+      "version": "0.3.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

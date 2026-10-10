@@ -1,0 +1,66 @@
+# Publishes Ronin wherever there is something new, on every push to main. Nothing to run by hand.
+#   npm: ronin-mcp, by trusted publishing (no token; npm checks this workflow's identity)
+#   MCP registry: io.github.Goofproof/ronin, logged in with this workflow's GitHub identity
+#   ClawHub: the ronin skill, with the CLAWHUB_TOKEN secret (skipped when the secret is not set)
+# Each step publishes only a version that is not out yet, so a push with no new version is a no-op.
+name: release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest
+      - id: v
+        working-directory: packages/ronin-mcp
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Publish ronin-mcp if this version is new
+        working-directory: packages/ronin-mcp
+        run: |
+          V=${{ steps.v.outputs.version }}
+          if npm view "ronin-mcp@$V" version >/dev/null 2>&1; then echo "ronin-mcp@$V is already out"; exit 0; fi
+          npm publish --provenance --access public
+          # npm stages new versions briefly; wait until it is installable before the registry checks it.
+          for i in $(seq 1 60); do npm view "ronin-mcp@$V" version >/dev/null 2>&1 && break; sleep 10; done
+  mcp-registry:
+    needs: npm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish to the MCP registry if this version is new
+        working-directory: packages/ronin-mcp
+        run: |
+          V=${{ needs.npm.outputs.version }}
+          if curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.Goofproof/ronin" | grep -q "\"version\":\"$V\""; then echo "registry already has $V"; exit 0; fi
+          curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
+  clawhub:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Publish the ClawHub skill if this version is new
+        env:
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+        run: |
+          if [ -z "$CLAWHUB_TOKEN" ]; then echo "no CLAWHUB_TOKEN secret yet; skipping ClawHub"; exit 0; fi
+          npx -y clawhub login --token "$CLAWHUB_TOKEN" --no-browser
+          V=$(sed -n 's/^version: //p' clawhub/ronin/SKILL.md | head -1)
+          S=$(npx -y clawhub skill publish clawhub/ronin --slug ronin --name Ronin --version "$V" --dry-run --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s.slice(s.indexOf('{'))).status)}catch{console.log('unknown')}})")
+          if [ "$S" != "would-publish" ]; then echo "ClawHub: $S for $V; nothing to do"; exit 0; fi
+          npx -y clawhub skill publish clawhub/ronin --slug ronin --name Ronin --version "$V" --changelog "Release $V"

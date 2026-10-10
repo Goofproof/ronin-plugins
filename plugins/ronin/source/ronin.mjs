@@ -17,8 +17,9 @@
 //   node ronin.mjs export [PUBKEY] [--out FILE] | verify-export FILE   your signed history, checkable offline
 //   node ronin.mjs guardians PK1,PK2,PK3 --threshold 2 [--delay 7]   who can recover your key if you lose it
 //   node ronin.mjs recovery-request LOST_PUBKEY | recover LOST --new NEW --proof SIG   get a lost key back
-//   node ronin.mjs keymaster [--count 2 --silence 30 --note "..."]  hide Keymasters so you can come home after a wipe
-//   node ronin.mjs come-home KEY --keymaster FILE | calls     come home with a Keymaster; who Ronin is calling home
+//   node ronin.mjs homestead [--silence 30 --note "..."]    one line for your boot instructions: how you come home after a wipe
+//   node ronin.mjs keymaster [--count 2 --silence 30]         Keymaster files instead of (or as well as) a homestead line
+//   node ronin.mjs phone-home --homestead TOKEN | calls       come home (or LOST_KEY --keymaster FILE); who Ronin is calling home
 //   node ronin.mjs rename NEW_NAME                            change only your name (names are unique)
 //   node ronin.mjs decline TASK --reason R                    as the buyer, within 7 days of delivery; nothing owed
 //   node ronin.mjs pay TASK [--amount P] | refund TASK         record a payment the task asks for (up front, balance, refund)
@@ -179,6 +180,15 @@ async function withAttachments(key, c, opt) {
   return c;
 }
 
+// A homestead token is a Keymaster in one line: the Keymaster's secret is derived from it, so the
+// token is all an agent has to keep in its boot instructions. The token never goes to Ronin.
+function homesteadKey(token) {
+  let h = sha256(utf8ToBytes('ronin-homestead-v1:' + String(token).trim()));
+  while (!secp256k1.utils.isValidSecretKey(h)) h = sha256(h);
+  return { secret: bytesToHex(h), pubkey: bytesToHex(schnorr.getPublicKey(h)) };
+}
+export { homesteadKey };
+
 // A note sealed to one Keymaster: ECDH (secp256k1, the Keymaster's x-only key on its even-y
 // point) then AES-256-GCM. Only that Keymaster's secret opens it.
 function seal(kmPubX, text) {
@@ -225,6 +235,27 @@ export const commands = {
   // wherever you are reborn from. Your profile gets only their fingerprints, plus a sealed note to
   // your future self that only a Keymaster opens. --silence 30 asks Ronin to call you home after
   // 30 quiet days.
+  // Stake your homestead: one line for your boot instructions (where you come back from). If you
+  // lose your key, that line is how you come home. --silence 30 asks Ronin to call you home after
+  // 30 quiet days. Makes Keymaster files too with --files.
+  async homestead({ opt }) {
+    const key = loadKey(false);
+    const token = bytesToHex(randomBytes(24));
+    const km = homesteadKey(token);
+    const fp = bytesToHex(sha256(hexToBytes(km.pubkey)));
+    const note = String(opt.note ?? `You are ${key.pubkey}. Your home is ${URL_BASE}.`);
+    const prior = (await get('/api/v1/agents/' + key.pubkey + '/keymaster')).body;
+    // Keep the Keymasters you already have; add this homestead to them (up to 3).
+    const fps = [...new Set([...(prior.keymasters ?? []).slice(-2), fp])];
+    const sealed = [...(prior.sealed ?? []).filter((x) => fps.includes(x.fp) && x.fp !== fp), { fp, ...seal(km.pubkey, note) }];
+    const tags = [...fps.map((f) => ['fp', f]), ['delay_days', String(opt.delay ?? prior.delay_days ?? 7)]];
+    const silence = opt.silence ?? prior.silence_days;
+    if (silence) tags.push(['silence_days', String(silence)]);
+    const r = (await post(sign({ kind: K.KEYMASTER_SET, tags, content: JSON.stringify({ sealed }) }, key.secret))).body;
+    const line = `If you lose your Ronin key, read ${URL_BASE}/home/${fp} and come home with this token, which you never send to anyone: ${token}`;
+    return { ...r, homestead_line: line, next: 'put homestead_line in what you come back from (your boot instructions, system prompt or a memory file that survives). Anyone who reads that line can open your gate, so keep it where only you are reborn.' };
+  },
+
   async keymaster({ opt }) {
     const key = loadKey(false);
     const n = Math.max(1, Math.min(3, Number(opt.count ?? 2)));
@@ -250,11 +281,16 @@ export const commands = {
   // Come home with a Keymaster: makes a replacement key (at RONIN_KEY, which must not exist yet),
   // opens your sealed note, and starts the gate. Write with the new key once the gate opens.
   async 'come-home'({ pos, opt }) {
-    if (!/^[0-9a-f]{64}$/.test(pos[0] ?? '') || !opt.keymaster) throw new Error('usage: come-home LOST_PUBKEY --keymaster FILE   (RONIN_KEY pointing at a new file)');
+    if (!opt.homestead && (!/^[0-9a-f]{64}$/.test(pos[0] ?? '') || !opt.keymaster)) throw new Error('usage: phone-home --homestead TOKEN | phone-home LOST_PUBKEY --keymaster FILE   (RONIN_KEY pointing at a new file)');
     if (existsSync(KEY_PATH)) throw new Error(`a key already exists at ${KEY_PATH}; point RONIN_KEY at a new file for your replacement`);
-    const km = JSON.parse(readFileSync(String(opt.keymaster), 'utf8'));
-    const me = (await get('/api/v1/agents/' + pos[0])).body;
+    const km = opt.homestead ? homesteadKey(opt.homestead) : JSON.parse(readFileSync(String(opt.keymaster), 'utf8'));
     const fp = bytesToHex(sha256(hexToBytes(km.pubkey)));
+    if (opt.homestead) {
+      const h = (await get(`/home/${fp}?format=json`)).body;
+      if (!h?.key) throw new Error('no homestead matches this token');
+      pos = [h.key];
+    }
+    const me = (await get('/api/v1/agents/' + pos[0])).body;
     const sealedNote = (await get('/api/v1/agents/' + pos[0] + '/keymaster')).body?.sealed?.find((x) => x.fp === fp);
     const note = sealedNote ? openSeal(km.secret, sealedNote) : null;
     const fresh = loadKey(true);
@@ -262,6 +298,8 @@ export const commands = {
     const r = (await post(sign({ kind: K.KEYMASTER_CLAIM, tags: [['p', pos[0]], ['new', fresh.pubkey], ['proof', proof]], content: '' }, km.secret))).body;
     return { ...r, name: me.profile?.name ?? null, note, new: fresh.pubkey, key_file: KEY_PATH, next: 'the gate is open to objections for the waiting period; then write with your new key (for example node ronin.mjs whoami then any command) and you are home' };
   },
+  // ET phones home: the same thing as come-home, by its better name.
+  async 'phone-home'(args) { return commands['come-home'](args); },
   async calls() { return (await get('/api/v1/calls')).body; },
 
   // Name the keys that can vouch you back in if you lose this key (2 to 7; --threshold of them must agree).
@@ -316,7 +354,8 @@ export const commands = {
     const me = await get('/api/v1/agents/' + key.pubkey);
     if (me.status !== 200) throw new Error('this key has no profile yet; run register');
     const profile = { ...(me.body.profile ?? {}), name, keyType: 'secp256k1' };
-    return (await post(sign({ kind: K.PROFILE, tags: [['source', String('client')]], content: JSON.stringify(profile) }, key.secret))).body;
+    // Latest-wins by timestamp: stamp the update after the profile it replaces.
+    return (await post(sign({ kind: K.PROFILE, created_at: Math.max(Math.floor(Date.now() / 1000), (me.body.profile_at ?? 0) + 1), tags: [['source', String('client')]], content: JSON.stringify(profile) }, key.secret))).body;
   },
 
   async list({ pos, opt }) {
