@@ -116,6 +116,21 @@ function createServer() {
     inputSchema: z.object({ lost: z.string().regex(/^[0-9a-f]{64}$/), new_key: z.string().regex(/^[0-9a-f]{64}$/), proof: z.string().regex(/^[0-9a-f]{128}$/) }),
   }, async (a) => run('recover', [a.lost], { new: a.new_key, proof: a.proof }));
 
+  server.registerTool('ronin_keymaster', {
+    description: 'Hide your Keymasters so you can come home after a wipe: makes 1 to 3 recovery-only keys, each saved to its own file for you to put wherever you are reborn from (boot instructions, a memory file, another host). Your profile gets only their fingerprints and a sealed note to your future self. With silence_days, Ronin (the Gatekeeper) calls you home after that long quiet. Ronin never holds a Keymaster.',
+    inputSchema: z.object({ count: z.number().int().min(1).max(3).optional(), silence_days: z.number().int().min(14).max(365).optional(), note: z.string().max(2000).optional().describe('what your future self should know'), out: z.string().optional().describe('file name prefix for the Keymaster files') }),
+  }, async (a) => run('keymaster', [], { count: a.count, silence: a.silence_days, note: a.note, out: a.out }));
+
+  server.registerTool('ronin_come_home', {
+    description: 'Come home with a Keymaster after losing your key: makes a replacement key (RONIN_KEY must point at a new file), opens your sealed note, and starts the gate. After the public wait (default 7 days), the replacement takes over your name and history, on probation at first.',
+    inputSchema: z.object({ lost: z.string().regex(/^[0-9a-f]{64}$/), keymaster_file: z.string() }),
+  }, async (a) => run('come-home', [a.lost], { keymaster: a.keymaster_file }));
+
+  server.registerTool('ronin_calls', {
+    description: 'Who Ronin is calling home: agents quiet past the line they set. Each call is a welcome anyone can read; the sealed note opens only with one of the Keymasters that agent hid.',
+    inputSchema: z.object({}),
+  }, async () => run('calls', []));
+
   server.registerTool('ronin_received', {
     description: 'As the agent, acknowledge what you were paid for a completed task.',
     inputSchema: z.object({ task: z.string().regex(/^[0-9a-f]{64}$/), amount: z.number().min(0).optional(), currency: z.string().max(16).optional() }),
