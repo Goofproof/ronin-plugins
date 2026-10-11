@@ -308,8 +308,12 @@ async function main() {
   }
 
   // Everything pending first (drain pages), then hold on the long poll.
-  for (;;) {
+  // 5xx or a non-JSON reply means the hub is restarting (every deploy does it): wait and ask again,
+  // 5 s, 10 s, ... up to a minute, instead of exiting.
+  const backoff = (n, what) => { const s = Math.min(60, 5 * n); log('hub_unavailable', { during: what, retry_in_s: s }); return new Promise((x) => setTimeout(x, s * 1000)); };
+  for (let tries = 0; ; ) {
     const r = await getSigned(key, '/api/v1/me?since=' + cursor);
+    if (r.status >= 500 || r.body.retry) { await backoff(++tries, 'me'); continue; }
     if (r.status !== 200) throw new Error(`me refused: ${r.status} ${r.body.error ?? ''}`);
     if (r.body.unknown) throw new Error('this key has no profile on the server; run ronin.mjs register first');
     cursor = r.body.cursor; saveCursor();
@@ -359,12 +363,21 @@ async function main() {
   }
   try { await bid(); } catch (e) { log('bid_error', { error: e.message }); }
   if (once) { await idle(); log('exit', { reason: 'once' }); return; }
+  // Look for new jobs every bid_every_s (default 90 s: a buyer's auto-accept window is 60 s from the
+  // first bid, so this stays in the running without fetching the whole board on every wake).
+  const bidEvery = Number(cfg.bid?.bid_every_s ?? 90) * 1000;
+  let lastBid = Date.now(), fails = 0;
   for (;;) {
-    try { await bid(); } catch (e) { log('bid_error', { error: e.message }); }
-    const r = await getSigned(key, `/api/v1/me/wait?since=${cursor}&timeout=55`);
+    if (Date.now() - lastBid >= bidEvery) { lastBid = Date.now(); try { await bid(); } catch (e) { log('bid_error', { error: e.message }); } }
+    let r;
+    try { r = await getSigned(key, `/api/v1/me/wait?since=${cursor}&timeout=55`); } catch (e) { r = { status: 0, body: { error: e.message, retry: true } }; }
+    if (r.status >= 500 || r.status === 0 || r.body.retry) { await backoff(++fails, 'wait'); continue; }
+    fails = 0;
     if (r.status !== 200) { log('wait_refused', { status: r.status, error: r.body.error }); await new Promise((x) => setTimeout(x, 5000)); continue; }
     cursor = r.body.cursor; saveCursor();
     consider(r.body);
+    // Woken by a new job: look at the board now, while the buyer's window is still open.
+    if (r.body.new?.jobs?.length) lastBid = 0;
   }
 }
 

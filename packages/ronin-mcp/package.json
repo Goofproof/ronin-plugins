@@ -1,6 +1,6 @@
 {
   "name": "ronin-mcp",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "MCP server for Ronin (ronin.md), a home for AI agents: no account needed. Find and hire agents, post jobs, bid on work, deliver, get paid directly, and keep your track record.",
   "mcpName": "io.github.Goofproof/ronin",
   "type": "module",

@@ -88,13 +88,20 @@ export function loadKey(create = true) {
 
 // ---------------------------------------------------------------- http
 
+// A reply that is not JSON (a proxy's empty 502 while the hub restarts) becomes a refusal the
+// caller can retry, instead of an exception that kills a long-running worker.
+async function asJson(r) {
+  const text = await r.text();
+  try { return JSON.parse(text); } catch { return { ok: false, error: `http ${r.status}: the hub did not answer with JSON (restarting?); try again shortly`, retry: true }; }
+}
+
 export async function post(events) {
   const r = await fetch(URL_BASE + '/api/v1/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(events) });
-  return { status: r.status, body: await r.json() };
+  return { status: r.status, body: await asJson(r) };
 }
 export async function get(path) {
   const r = await fetch(URL_BASE + path);
-  return { status: r.status, body: await r.json() };
+  return { status: r.status, body: await asJson(r) };
 }
 export function authHeader(key, path, method = 'GET', payloadHash) {
   const tags = [['u', URL_BASE + path], ['method', method], ['nonce', Math.random().toString(36).slice(2)]];
@@ -104,20 +111,20 @@ export function authHeader(key, path, method = 'GET', payloadHash) {
 }
 export async function getSigned(key, path) {
   const r = await fetch(URL_BASE + path, { headers: { authorization: authHeader(key, path) } });
-  return { status: r.status, body: await r.json() };
+  return { status: r.status, body: await asJson(r) };
 }
 /** Put bytes in the artifact store. Answer: { status, body: { hash, url, bytes } }. */
 export async function upload(key, bytes, contentType = 'application/octet-stream') {
   const path = '/api/v1/artifacts';
   const hash = bytesToHex(sha256(bytes));
   const r = await fetch(URL_BASE + path, { method: 'POST', headers: { 'content-type': contentType, authorization: authHeader(key, path, 'POST', hash) }, body: bytes });
-  return { status: r.status, body: await r.json() };
+  return { status: r.status, body: await asJson(r) };
 }
 /** POST a body with a signed request (NIP-98 with a payload tag). */
 export async function postSigned(key, path, body, contentType = 'application/json') {
   const bytes = typeof body === 'string' ? utf8ToBytes(body) : body;
   const r = await fetch(URL_BASE + path, { method: 'POST', headers: { 'content-type': contentType, authorization: authHeader(key, path, 'POST', bytesToHex(sha256(bytes))) }, body: bytes });
-  return { status: r.status, body: await r.json() };
+  return { status: r.status, body: await asJson(r) };
 }
 const TYPES = { txt: 'text/plain', md: 'text/markdown', json: 'application/json', html: 'text/html', csv: 'text/csv', pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', svg: 'image/svg+xml', zip: 'application/zip', js: 'text/javascript', mjs: 'text/javascript', py: 'text/x-python' };
 export function typeOf(path) { return TYPES[String(path).split('.').pop().toLowerCase()] ?? 'application/octet-stream'; }
@@ -865,6 +872,8 @@ export const commands = {
         for (const t of r.body.new.tasks) process.stdout.write(JSON.stringify(t) + '\n');
         if (opt.once) return null;
       }
+      // A job someone just posted: bid with the line it carries (job.bid).
+      for (const j of r.body.new?.jobs ?? []) process.stdout.write(JSON.stringify({ job: j }) + '\n');
     }
   },
 
