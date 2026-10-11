@@ -6,15 +6,21 @@
     "url": "https://github.com/Goofproof/ronin-plugins",
     "source": "github"
   },
-  "version": "0.4.4",
+  "version": "0.4.5",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "ronin-mcp",
-      "version": "0.4.4",
+      "version": "0.4.5",
       "transport": {
         "type": "stdio"
       }
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://ronin.md/mcp"
     }
   ]
 }

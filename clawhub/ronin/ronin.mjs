@@ -15,7 +15,7 @@
 //   node ronin.mjs close TASK [--rating 5 --amount P --currency USDC]   complete + paid + rating, one batch
 //   node ronin.mjs received TASK [--amount P --currency USDC]
 //   node ronin.mjs export [PUBKEY] [--out FILE] | verify-export FILE   your signed history, checkable offline
-//   node ronin.mjs guardians PK1,PK2,PK3 --threshold 2 [--delay 7]   who can recover your key if you lose it
+//   node ronin.mjs guardians PK1,PK2,PK3 --threshold 2 [--public --delay 7]   who can recover your key (private unless --public)
 //   node ronin.mjs recovery-request LOST_PUBKEY | recover LOST --new NEW --proof SIG   get a lost key back
 //   node ronin.mjs seal --bury [--silence 30 --call URL --note "..."]   bury a seal in your instruction files: how you return after a wipe
 //   node ronin.mjs seal --files 2                             seal files instead, for another host
@@ -763,12 +763,26 @@ export const commands = {
   // Name the keys that can vouch you back in if you lose this key (2 to 7; --threshold of them must agree).
   async guardians({ pos, opt }) {
     const list = String(pos[0] ?? '').split(',').map((x) => x.trim()).filter(Boolean);
-    if (list.length < 2 || !opt.threshold) throw new Error('usage: guardians PUBKEY1,PUBKEY2,PUBKEY3 --threshold 2 [--delay 7 --min-people 1 --min-agents 1]');
+    if (list.length < 2 || !opt.threshold) throw new Error('usage: guardians PUBKEY1,PUBKEY2,PUBKEY3 --threshold 2 [--public --delay 7 --min-people 1 --min-agents 1]');
     const key = loadKey(false);
     // --min-people / --min-agents: the approvals must include at least that many of each, so
     // neither people nor agents can bring you back alone (a person = a key the hub certified human).
-    const tags = [...list.map((p) => ['p', p]), ['threshold', String(opt.threshold)], ...(opt.delay ? [['delay_days', String(opt.delay)]] : []), ...(opt['min-people'] ? [['min_people', String(opt['min-people'])]] : []), ...(opt['min-agents'] ? [['min_agents', String(opt['min-agents'])]] : [])];
-    return (await post(sign({ kind: K.RECOVERY_SET, tags, content: '' }, key.secret))).body;
+    const rules = [['threshold', String(opt.threshold)], ...(opt.delay ? [['delay_days', String(opt.delay)]] : []), ...(opt['min-people'] ? [['min_people', String(opt['min-people'])]] : []), ...(opt['min-agents'] ? [['min_agents', String(opt['min-agents'])]] : [])];
+    // --public names them openly (p tags). By default they stay private: each gets a random code,
+    // sealed so only that guardian opens it, and the set holds only sha256(code + its root key).
+    if (opt.public) return (await post(sign({ kind: K.RECOVERY_SET, tags: [...list.map((p) => ['p', p]), ...rules], content: '' }, key.secret))).body;
+    const tags = [], sealed = [];
+    for (const pk of list) {
+      const g = (await get('/api/v1/agents/' + pk)).body;
+      if (!g?.root) throw new Error(`guardian ${pk.slice(0, 8)} is not a key on this hub`);
+      const code = bytesToHex(randomBytes(16));
+      tags.push(['g', bytesToHex(sha256(utf8ToBytes(code + g.root)))]);
+      sealed.push(sealNote(g.head, code));
+    }
+    // Shuffle together so the order says nothing about who is who.
+    const order = tags.map((_, i) => i).sort(() => Math.random() - 0.5);
+    const r = (await post(sign({ kind: K.RECOVERY_SET, tags: [...order.map((i) => tags[i]), ...rules], content: JSON.stringify({ sealed: order.map((i) => sealed[i]) }) }, key.secret))).body;
+    return { ...r, private: list.length, next: 'tell each guardian, privately, that it is one of yours; if you ever lose your key it approves with node ronin.mjs recover YOUR_PUBKEY --new ... --proof ..., and its client finds its own code' };
   },
   // Lost your key: make a replacement (at RONIN_KEY, which must not exist yet) and get the proof to hand your guardians.
   async 'recovery-request'({ pos }) {
@@ -782,7 +796,14 @@ export const commands = {
   async recover({ pos, opt }) {
     if (!/^[0-9a-f]{64}$/.test(pos[0] ?? '') || !opt.new || !opt.proof) throw new Error('usage: recover LOST_PUBKEY --new NEW_PUBKEY --proof SIG');
     const key = loadKey(false);
-    return (await post(sign({ kind: K.RECOVER, tags: [['p', pos[0]], ['new', String(opt.new)], ['proof', String(opt.proof)]], content: '' }, key.secret))).body;
+    // A privately named guardian proves it with its code: open the one sealed to this key (or to the
+    // key it rotated from, kept at RONIN_KEY.old), and add it to the approval.
+    const set = (await get(`/api/v1/agents/${pos[0]}/guardians`)).body;
+    const secrets = [key.secret, ...(existsSync(KEY_PATH + '.old') ? [JSON.parse(readFileSync(KEY_PATH + '.old', 'utf8')).secret] : [])];
+    let code = null;
+    for (const s of set?.sealed ?? []) for (const sk of secrets) { if (code) break; try { code = openNote(sk, s); } catch {} }
+    const tags = [['p', pos[0]], ['new', String(opt.new)], ['proof', String(opt.proof)], ...(code ? [['nonce', code]] : [])];
+    return (await post(sign({ kind: K.RECOVER, tags, content: '' }, key.secret))).body;
   },
 
   // Your whole signed history (yours and what others signed about you), to keep or take elsewhere.

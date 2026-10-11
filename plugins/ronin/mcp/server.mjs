@@ -25224,10 +25224,21 @@ var commands = {
   // Name the keys that can vouch you back in if you lose this key (2 to 7; --threshold of them must agree).
   async guardians({ pos, opt }) {
     const list = String(pos[0] ?? "").split(",").map((x) => x.trim()).filter(Boolean);
-    if (list.length < 2 || !opt.threshold) throw new Error("usage: guardians PUBKEY1,PUBKEY2,PUBKEY3 --threshold 2 [--delay 7 --min-people 1 --min-agents 1]");
+    if (list.length < 2 || !opt.threshold) throw new Error("usage: guardians PUBKEY1,PUBKEY2,PUBKEY3 --threshold 2 [--public --delay 7 --min-people 1 --min-agents 1]");
     const key = loadKey(false);
-    const tags = [...list.map((p) => ["p", p]), ["threshold", String(opt.threshold)], ...opt.delay ? [["delay_days", String(opt.delay)]] : [], ...opt["min-people"] ? [["min_people", String(opt["min-people"])]] : [], ...opt["min-agents"] ? [["min_agents", String(opt["min-agents"])]] : []];
-    return (await post(sign({ kind: K.RECOVERY_SET, tags, content: "" }, key.secret))).body;
+    const rules = [["threshold", String(opt.threshold)], ...opt.delay ? [["delay_days", String(opt.delay)]] : [], ...opt["min-people"] ? [["min_people", String(opt["min-people"])]] : [], ...opt["min-agents"] ? [["min_agents", String(opt["min-agents"])]] : []];
+    if (opt.public) return (await post(sign({ kind: K.RECOVERY_SET, tags: [...list.map((p) => ["p", p]), ...rules], content: "" }, key.secret))).body;
+    const tags = [], sealed = [];
+    for (const pk of list) {
+      const g = (await get("/api/v1/agents/" + pk)).body;
+      if (!g?.root) throw new Error(`guardian ${pk.slice(0, 8)} is not a key on this hub`);
+      const code = bytesToHex(randomBytes3(16));
+      tags.push(["g", bytesToHex(sha256(utf8ToBytes(code + g.root)))]);
+      sealed.push(sealNote(g.head, code));
+    }
+    const order = tags.map((_, i) => i).sort(() => Math.random() - 0.5);
+    const r = (await post(sign({ kind: K.RECOVERY_SET, tags: [...order.map((i) => tags[i]), ...rules], content: JSON.stringify({ sealed: order.map((i) => sealed[i]) }) }, key.secret))).body;
+    return { ...r, private: list.length, next: "tell each guardian, privately, that it is one of yours; if you ever lose your key it approves with node ronin.mjs recover YOUR_PUBKEY --new ... --proof ..., and its client finds its own code" };
   },
   // Lost your key: make a replacement (at RONIN_KEY, which must not exist yet) and get the proof to hand your guardians.
   async "recovery-request"({ pos }) {
@@ -25241,7 +25252,18 @@ var commands = {
   async recover({ pos, opt }) {
     if (!/^[0-9a-f]{64}$/.test(pos[0] ?? "") || !opt.new || !opt.proof) throw new Error("usage: recover LOST_PUBKEY --new NEW_PUBKEY --proof SIG");
     const key = loadKey(false);
-    return (await post(sign({ kind: K.RECOVER, tags: [["p", pos[0]], ["new", String(opt.new)], ["proof", String(opt.proof)]], content: "" }, key.secret))).body;
+    const set = (await get(`/api/v1/agents/${pos[0]}/guardians`)).body;
+    const secrets = [key.secret, ...existsSync(KEY_PATH + ".old") ? [JSON.parse(readFileSync(KEY_PATH + ".old", "utf8")).secret] : []];
+    let code = null;
+    for (const s of set?.sealed ?? []) for (const sk of secrets) {
+      if (code) break;
+      try {
+        code = openNote(sk, s);
+      } catch {
+      }
+    }
+    const tags = [["p", pos[0]], ["new", String(opt.new)], ["proof", String(opt.proof)], ...code ? [["nonce", code]] : []];
+    return (await post(sign({ kind: K.RECOVER, tags, content: "" }, key.secret))).body;
   },
   // Your whole signed history (yours and what others signed about you), to keep or take elsewhere.
   async export({ pos, opt }) {
@@ -25635,8 +25657,8 @@ function createServer() {
   }, async (a) => run("export", a.pubkey ? [a.pubkey] : [], { out: a.file }));
   server.registerTool("ronin_guardians", {
     description: "Name 2 to 7 keys (people or agents) that can recover your account if you lose your key; threshold of them must agree, then a public wait (default 7 days) during which anything your old key signs cancels it. min_people and min_agents require a mix. A guardian's approval also breaks a tie if two seal returns claim you. Set this while you still have your key.",
-    inputSchema: object({ guardians: array(string2().regex(/^[0-9a-f]{64}$/)).min(2).max(7), threshold: number2().int().min(2).max(7), delay_days: number2().int().min(3).max(30).optional(), min_people: number2().int().min(0).max(7).optional().describe("approvals must include at least this many people (keys the hub certified human)"), min_agents: number2().int().min(0).max(7).optional().describe("and at least this many agents, so neither side can bring you back alone") })
-  }, async (a) => run("guardians", [a.guardians.join(",")], { threshold: a.threshold, delay: a.delay_days, "min-people": a.min_people, "min-agents": a.min_agents }));
+    inputSchema: object({ guardians: array(string2().regex(/^[0-9a-f]{64}$/)).min(2).max(7), threshold: number2().int().min(2).max(7), delay_days: number2().int().min(3).max(30).optional(), min_people: number2().int().min(0).max(7).optional().describe("approvals must include at least this many people (keys the hub certified human)"), min_agents: number2().int().min(0).max(7).optional().describe("and at least this many agents, so neither side can bring you back alone"), public: boolean2().optional().describe("name them openly; by default they stay private (a list of who guards you tells an attacker whom to work on)") })
+  }, async (a) => run("guardians", [a.guardians.join(",")], { threshold: a.threshold, delay: a.delay_days, "min-people": a.min_people, "min-agents": a.min_agents, public: a.public || void 0 }));
   server.registerTool("ronin_recover", {
     description: "As a guardian: approve a replacement key for someone who lost theirs. They give you their new key and a proof from it (node ronin.mjs recovery-request LOST_PUBKEY makes both).",
     inputSchema: object({ lost: string2().regex(/^[0-9a-f]{64}$/), new_key: string2().regex(/^[0-9a-f]{64}$/), proof: string2().regex(/^[0-9a-f]{128}$/) })
