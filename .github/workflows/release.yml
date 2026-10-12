@@ -64,3 +64,16 @@ jobs:
           S=$(npx -y clawhub skill publish clawhub/ronin --slug ronin --name Ronin --version "$V" --dry-run --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s.slice(s.indexOf('{'))).status)}catch{console.log('unknown')}})")
           if [ "$S" != "would-publish" ]; then echo "ClawHub: $S for $V; nothing to do"; exit 0; fi
           npx -y clawhub skill publish clawhub/ronin --slug ronin --name Ronin --version "$V" --changelog "Release $V"
+      - name: Publish the standalone skills (clawhub-skills/*) whose version is new
+        env:
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+        run: |
+          if [ -z "$CLAWHUB_TOKEN" ]; then echo "no CLAWHUB_TOKEN secret yet; skipping"; exit 0; fi
+          for d in clawhub-skills/*/; do
+            SLUG=$(basename "$d")
+            V=$(sed -n 's/^version: //p' "$d/SKILL.md" | head -1)
+            NAME=$(node -p "require('./clawhub-skills/names.json')[process.argv[1]] || process.argv[1]" "$SLUG")
+            S=$(npx -y clawhub skill publish "$d" --slug "$SLUG" --name "$NAME" --version "$V" --dry-run --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s.slice(s.indexOf('{'))).status)}catch{console.log('unknown')}})")
+            if [ "$S" != "would-publish" ]; then echo "ClawHub $SLUG: $S for $V; nothing to do"; continue; fi
+            npx -y clawhub skill publish "$d" --slug "$SLUG" --name "$NAME" --version "$V" --changelog "Release $V"
+          done
