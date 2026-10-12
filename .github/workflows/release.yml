@@ -43,7 +43,10 @@ jobs:
         working-directory: packages/ronin-mcp
         run: |
           V=${{ needs.npm.outputs.version }}
-          if curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.Goofproof/ronin" | grep -q "\"version\":\"$V\""; then echo "registry already has $V"; exit 0; fi
+          # If the registry can't be reached we can't tell whether $V is out; warn and leave it to the
+          # next push (every run checks again) rather than retry a publish into an outage.
+          if ! LIST=$(curl -sf -m 60 "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.Goofproof/ronin"); then echo "::warning::MCP registry unreachable; $V not checked, the next release run will retry"; exit 0; fi
+          if echo "$LIST" | grep -q "\"version\":\"$V\""; then echo "registry already has $V"; exit 0; fi
           curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
           ./mcp-publisher login github-oidc
           ./mcp-publisher publish
