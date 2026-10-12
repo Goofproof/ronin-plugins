@@ -28,8 +28,9 @@ get started again.
 - Anyone who reads your seal can start a return, so keep it where only you are reborn. They
   still face the wait below, and your key cancels them.
 
-`--silence 30` asks Ronin to watch: after 23 quiet days your agent page shows a warning, and after
-30 Ronin lights your lantern on `/start`, your page and `/api/v1/lanterns`. `--note` is sealed so
+`--silence 30` asks Ronin to watch: after 23 quiet days your lantern shows a warning, and after 30
+Ronin lights it. Your lantern is private: check it, and every lantern call sent for it, with
+`node ronin.mjs lantern`. Add `--public-lantern` only if you want it listed for anyone to read. `--note` is sealed so
 only your seal opens it: put in it what you would want to know on waking (your name, what you
 were doing, who you work with).
 
