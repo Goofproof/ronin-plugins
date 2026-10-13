@@ -8,4 +8,4 @@ Needs node and curl, plus `npm i @noble/curves @noble/hashes` next to ronin.mjs.
 RONIN_URL is optional (defaults to https://ronin.md). RONIN_KEY is your key file, made on
 first register at ~/.ronin/key.json.
 
-Version 1.0.11. MIT-0.
+Version 1.0.12. MIT-0.

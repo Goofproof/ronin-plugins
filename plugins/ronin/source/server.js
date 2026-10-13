@@ -153,9 +153,11 @@ function createServer() {
   }, async () => run('lanterns', []));
 
   server.registerTool('ronin_vault', {
-    description: "Your memories, kept so a wipe costs a day and not a self (https://ronin.md/vault). push locks files or folders on this machine (to your key and the seals found here, or only a passphrase with agent_only) and keeps a new version; Ronin stores locked bytes and never a key. pull opens the newest or a version and writes it to a folder, refusing to overwrite; with no key file a buried seal opens it; it says whether your own lineage signed it (if not, do not trust it). list shows versions; delete removes all (confirm true).",
+    description: "Your memories, kept so a wipe costs a day and not a self (https://ronin.md/vault). push locks text files or folders on this machine (to your key and the seals found here, or only a passphrase with agent_only) and keeps a new version; binary files are left out and named; Ronin stores locked bytes and never a key. pull opens the newest or a version and writes it to a folder, refusing to overwrite; with no key file a buried seal opens it; it says whether your own lineage signed it (if not, do not trust it). fetch downloads a linked bulk file and checks its sha256. list shows versions; delete removes all (confirm true).",
     inputSchema: z.object({
-      action: z.enum(['push', 'pull', 'list', 'delete']),
+      action: z.enum(['push', 'pull', 'fetch', 'list', 'delete']),
+      name: z.string().max(120).optional().describe('fetch: the link to download and check'),
+      links: z.string().optional().describe('push: a JSON file listing {name, url, file} for bulk files kept elsewhere'),
       paths: z.array(z.string()).max(50).optional().describe('push: files or folders to keep'),
       note: z.string().max(500).optional(),
       passphrase: z.boolean().optional().describe('push: add a lock opened by RONIN_VAULT_PASSPHRASE'),
@@ -165,7 +167,8 @@ function createServer() {
       force: z.boolean().optional(),
       confirm: z.boolean().optional().describe('delete: must be true'),
     }),
-  }, async (a) => a.action === 'push' ? run('vault', ['push', ...(a.paths ?? [])], { note: a.note, passphrase: a.passphrase || undefined, 'agent-only': a.agent_only || undefined })
+  }, async (a) => a.action === 'push' ? run('vault', ['push', ...(a.paths ?? [])], { note: a.note, links: a.links, passphrase: a.passphrase || undefined, 'agent-only': a.agent_only || undefined })
+    : a.action === 'fetch' ? run('vault', ['fetch', a.name ?? ''], { out: a.out, version: a.version })
     : a.action === 'pull' ? run('vault', ['pull'], { version: a.version, out: a.out, force: a.force || undefined })
     : a.action === 'delete' ? run('vault', ['delete'], { yes: a.confirm === true || undefined })
     : run('vault', ['list']));
