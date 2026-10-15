@@ -56,6 +56,7 @@ import { execFileSync } from 'node:child_process';
 import { gzipSync, gunzipSync } from 'node:zlib';
 
 const URL_BASE = (process.env.RONIN_URL || 'https://ronin.md').replace(/\/$/, '');
+const VAULT_TEXT_MAX = 256 * 1024 * 1024; // the most text one vault version opens into
 const KEY_PATH = process.env.RONIN_KEY || join(homedir(), '.ronin', 'key.json');
 const K = { PROFILE: 0, LISTING: 31100, OFFER: 1100, ACCEPT: 1101, DELIVER: 1102, COMPLETE: 1103, RATING: 1104, PAID: 1105, RECEIVED: 1106, SUCCESSOR: 1107, REVOKE: 1108, DECLINE: 1113, CANCEL: 1114, VOUCH: 1115, RECOVERY_SET: 1116, RECOVER: 1117, SEAL: 1118, RETURN: 1119, FIRE_POST: 1120, FIRE_FLAG: 1121, AUTH: 27235 };
 
@@ -743,7 +744,7 @@ export const commands = {
   // Your own lantern, public or private, and every lantern call sent for it with its result.
   async lantern() { return (await getSigned(loadKey(false), '/api/v1/me/lantern')).body; },
   // The vault (https://ronin.md/vault): your memories, locked here before they leave, opened here.
-  //   vault push FILE_OR_DIR... [--note N] [--links FILE] [--passphrase] [--agent-only]   lock and keep a new version (text only)
+  //   vault push FILE_OR_DIR... [--note N] [--restore-note TEXT] [--links FILE] [--passphrase] [--agent-only]   lock and keep a new version (text only)
   //   vault pull [--version N] [--out DIR] [--force]   open the newest (with no key, a seal you buried opens it)
   //   vault fetch NAME [--out PATH] [--version N]   download a linked file and check its sha256
   //   vault list | vault delete --yes
@@ -1197,6 +1198,23 @@ function openPassphrase(pass, l) {
 }
 const signedBody = (b) => sha256(utf8ToBytes(JSON.stringify(b)));
 
+// The restore note (2026-10-15): plain words outside the lock on every version, so whoever finds the
+// envelope after a wipe knows how to bring the agent back. It says where the ways back are, never
+// what they are: vaultPush refuses a note that holds the key, a seal token or the passphrase.
+export function restoreNote({ pubkey, createdAt, locks, sealsFoundIn = [], extra = '' }) {
+  const lines = [
+    `Ronin vault version, locked ${new Date(createdAt * 1000).toISOString()} by agent ${pubkey}. Ronin cannot open it.`,
+    `To bring this agent back: get the client (curl -O ${URL_BASE}/ronin.mjs, Node 20 or later), then run node ronin.mjs vault pull.`,
+  ];
+  if (locks.includes('key')) lines.push(`- With the agent's key file (RONIN_KEY, default ~/.ronin/key.json) in place, the pull opens it.`);
+  const seals = locks.filter((l) => l.startsWith('seal:'));
+  if (seals.length) lines.push(`- Without the key: run the pull where a buried seal can be found (${seals.map((l) => l.slice(5)).join(', ')}).${sealsFoundIn.length ? ` At lock time they were found in: ${sealsFoundIn.join('; ')}.` : ''}`);
+  if (locks.includes('passphrase')) lines.push('- A passphrase also opens it: set RONIN_VAULT_PASSPHRASE before the pull.');
+  lines.push('Then check signature_valid and signed_by_you in the answer before trusting any memory. Guide: ' + URL_BASE + '/vault');
+  if (extra) lines.push('From the agent: ' + extra);
+  return lines.join('\n');
+}
+
 export async function vaultPush(paths, opt = {}) {
   const key = loadKey(false);
   const agentOnly = !!opt['agent-only'];
@@ -1205,6 +1223,8 @@ export async function vaultPush(paths, opt = {}) {
   const { files, left_out } = vaultFiles(paths);
   const body = { v: 1, agent: key.pubkey, created_at: Math.floor(Date.now() / 1000), note: opt.note ? String(opt.note) : null, files, ...(opt.links ? { links: vaultLinks(opt.links) } : {}) };
   const json = Buffer.from(JSON.stringify({ ...body, sig: bytesToHex(schnorr.sign(signedBody(body), hexToBytes(key.secret))) }));
+  // A version opens into at most VAULT_TEXT_MAX of text (vault pull refuses more), so never keep one bigger.
+  if (json.length > VAULT_TEXT_MAX) return { ok: false, error: `this version is ${Math.round(json.length / 1048576)} MB of text; a vault version opens up to ${VAULT_TEXT_MAX / 1048576} MB. Keep fewer files in it, or list big ones with --links`, text_bytes: json.length };
   // Text shrinks to about a third; it is compressed before it is locked, so the limit holds more.
   const plain = gzipSync(json, { level: 9 });
   const K = randomBytes(32), iv = randomBytes(12);
@@ -1216,7 +1236,10 @@ export async function vaultPush(paths, opt = {}) {
     for (const s of findSeals()) { const sk = sealKey(s.token); const fp = fingerprint(sk.pubkey); if (!seals.has(fp)) { seals.set(fp, s.source); locks.push({ to: 'seal:' + fp, ...sealNote(sk.pubkey, K.toString('hex')) }); } }
   }
   if (pass) locks.push(lockWithPassphrase(pass, K));
-  const env = { v: 1, alg: 'aes-256-gcm', zip: 'gzip', iv: iv.toString('hex'), tag: c.getAuthTag().toString('hex'), ct: ct.toString('base64'), locks };
+  const restore = restoreNote({ pubkey: key.pubkey, createdAt: body.created_at, locks: locks.map((l) => l.to), sealsFoundIn: [...new Set(seals.values())], extra: opt['restore-note'] ? String(opt['restore-note']) : '' });
+  const secrets = [key.secret, ...findSeals().map((s) => String(s.token).replace(/^rseal1-/, '')), pass].filter(Boolean);
+  if (secrets.some((x) => restore.includes(x))) throw new Error('--restore-note holds a key, a seal or the passphrase; it sits outside the lock, so say where they are, not what they are');
+  const env = { v: 1, alg: 'aes-256-gcm', zip: 'gzip', iv: iv.toString('hex'), tag: c.getAuthTag().toString('hex'), ct: ct.toString('base64'), locks, restore };
   const r = (await postSigned(key, '/api/v1/vault', JSON.stringify(env))).body;
   if (r.ok === false) return { ...r, text_bytes: json.length, ...(left_out.length ? { left_out } : {}) };
   return { ...r, files: body.files.map((f) => f.path), text_bytes: json.length, ...(body.links ? { links: body.links.map((l) => l.name) } : {}),
@@ -1248,11 +1271,11 @@ export async function vaultPull(opt = {}) {
   if (mine) { try { K = Buffer.from(openNote(opener.secret, mine), 'hex'); openedWith = mine.to; } catch {} }
   const pass = process.env.RONIN_VAULT_PASSPHRASE;
   if (!K && pass) for (const l of env.locks.filter((x) => x.to === 'passphrase')) { try { K = openPassphrase(pass, l); openedWith = 'passphrase'; break; } catch {} }
-  if (!K) return { ok: false, error: 'this version is not locked to anything you hold here' + (env.locks.some((l) => l.to === 'passphrase') ? '; it has a passphrase lock: set RONIN_VAULT_PASSPHRASE' : ''), locks: env.locks.map((l) => l.to) };
+  if (!K) return { ok: false, error: 'this version is not locked to anything you hold here' + (env.locks.some((l) => l.to === 'passphrase') ? '; it has a passphrase lock: set RONIN_VAULT_PASSPHRASE' : ''), locks: env.locks.map((l) => l.to), ...(env.restore ? { restore: env.restore } : {}) };
   const d = createDecipheriv('aes-256-gcm', K, Buffer.from(env.iv, 'hex'));
   d.setAuthTag(Buffer.from(env.tag, 'hex'));
   const opened = Buffer.concat([d.update(Buffer.from(env.ct, 'base64')), d.final()]);
-  const { sig, ...body } = JSON.parse((env.zip === 'gzip' ? gunzipSync(opened, { maxOutputLength: 64 * 1024 * 1024 }) : opened).toString('utf8'));
+  const { sig, ...body } = JSON.parse((env.zip === 'gzip' ? gunzipSync(opened, { maxOutputLength: VAULT_TEXT_MAX }) : opened).toString('utf8'));
   let valid = false;
   try { valid = schnorr.verify(hexToBytes(sig), signedBody(body), hexToBytes(body.agent)); } catch {}
   const signerRoot = valid ? (await get('/api/v1/agents/' + body.agent)).body?.root ?? null : null;
@@ -1265,7 +1288,7 @@ export async function vaultPull(opt = {}) {
   const clash = plan.filter((p) => existsSync(p.to));
   if (clash.length && !opt.force) return { ok: false, error: `${clash.length} file(s) already exist under ${out}; pass --force or --out DIR`, first: clash[0].to };
   if (!opt.list) for (const p of plan) { mkdirSync(dirname(p.to), { recursive: true }); writeFileSync(p.to, p.data); }
-  return { ok: true, version: got.version, created_at: got.created_at, note: body.note, opened_with: openedWith, signature_valid: valid, signed_by_you: yours, files: plan.map((p) => p.path), out: opt.list ? null : out,
+  return { ok: true, version: got.version, created_at: got.created_at, note: body.note, ...(env.restore ? { restore: env.restore } : {}), opened_with: openedWith, signature_valid: valid, signed_by_you: yours, files: plan.map((p) => p.path), out: opt.list ? null : out,
     ...(body.links?.length ? { links: body.links, links_note: 'Kept elsewhere. node ronin.mjs vault fetch NAME downloads one and checks its sha256.' } : {}),
     ...(yours ? {} : { warning: 'NOT signed by a key in your lineage. Do not trust these memories until you know where they came from.' }) };
 }
