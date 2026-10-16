@@ -24544,7 +24544,7 @@ var genKeccak = (suffix, blockLen, outputLen, info = {}) => createHasher(() => n
 var keccak_256 = /* @__PURE__ */ genKeccak(1, 136, 32);
 
 // public/ronin.mjs
-import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, chmodSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve, basename } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -25017,7 +25017,8 @@ function signTx(tx, secretHex) {
   const raw = concat([Uint8Array.of(2), rlp([...fields, BigInt(sig.recovery), sig.r, sig.s])]);
   return { raw: "0x" + bytesToHex(raw), hash: "0x" + bytesToHex(keccak_256(raw)) };
 }
-async function sendUsdc(wallet, to, amount) {
+async function sendUsdc(wallet, to, amount, onSent = () => {
+}) {
   if (!isAddress(to)) throw new Error("to must be a 0x address on Base");
   const units = usdcUnits(amount);
   const data = "0xa9059cbb" + pad32(to.toLowerCase()) + pad32(units.toString(16));
@@ -25031,12 +25032,54 @@ async function sendUsdc(wallet, to, amount) {
   const maxFee = BigInt(gasPrice) * 2n + BigInt(tip);
   const { raw, hash } = signTx({ chainId: BASE.chainId, nonce, maxPriorityFeePerGas: tip, maxFeePerGas: maxFee, gas: BigInt(gas) * 12n / 10n, to: BASE.usdc, value: 0, data }, wallet.secret);
   const sent = await rpc("eth_sendRawTransaction", [raw]);
+  onSent(sent);
+  return receiptOf(sent, hash);
+}
+async function receiptOf(sent, hash) {
   for (let i = 0; i < 60; i++) {
     const r = await rpc("eth_getTransactionReceipt", [sent]);
     if (r) return { tx: sent, ok: r.status === "0x1", block: parseInt(r.blockNumber, 16), explorer: `${BASE.explorer}/tx/${sent}`, computed_hash_matches: sent === hash };
     await new Promise((res) => setTimeout(res, 2e3));
   }
   return { tx: sent, ok: null, pending: true, explorer: `${BASE.explorer}/tx/${sent}` };
+}
+async function sendEth(wallet, to, wei, onSent = () => {
+}) {
+  if (!isAddress(to)) throw new Error("to must be a 0x address on Base");
+  const from = wallet.address;
+  const [nonce, gasPrice, tip] = await Promise.all([
+    rpc("eth_getTransactionCount", [from, "pending"]),
+    rpc("eth_gasPrice", []),
+    rpc("eth_maxPriorityFeePerGas", []).catch(() => "0x0")
+  ]);
+  const { raw, hash } = signTx({ chainId: BASE.chainId, nonce, maxPriorityFeePerGas: tip, maxFeePerGas: BigInt(gasPrice) * 2n + BigInt(tip), gas: 21000n, to, value: wei, data: "0x" }, wallet.secret);
+  const sent = await rpc("eth_sendRawTransaction", [raw]);
+  onSent(sent);
+  return receiptOf(sent, hash);
+}
+var GAS_GRANT = 20000000000000n;
+var GAS_FLOOR = 5000000000000n;
+var SENT_PATH = () => join(dirname(WALLET_PATH), "sent.jsonl");
+function noteSent(rec) {
+  mkdirSync(dirname(SENT_PATH()), { recursive: true });
+  appendFileSync(SENT_PATH(), JSON.stringify({ ...rec, at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
+}
+function sentFor(task, stage, what) {
+  if (!existsSync(SENT_PATH())) return null;
+  return readFileSync(SENT_PATH(), "utf8").split("\n").filter(Boolean).map((l) => {
+    try {
+      return JSON.parse(l);
+    } catch {
+      return null;
+    }
+  }).find((r) => r && r.task === task && r.stage === stage && r.what === what) ?? null;
+}
+async function gasGrant(task, to) {
+  if (sentFor(task, "grant", "eth")) return { sent: false, why: "already sent for this task" };
+  const have = BigInt(await rpc("eth_getBalance", [to, "latest"]));
+  if (have >= GAS_FLOOR) return { sent: false, why: "the payee already holds enough ETH for fees" };
+  const r = await sendEth(loadWallet(false), to, GAS_GRANT, (tx) => noteSent({ task, stage: "grant", what: "eth", tx, to, amount: "0.00002" }));
+  return { sent: r.ok === true, eth: "0.00002", tx: r.tx, explorer: r.explorer, ...r.ok === true ? {} : { pending: r.ok === null } };
 }
 async function verifyUsdc(txHash, to, amount) {
   if (!/^0x[0-9a-fA-F]{64}$/.test(String(txHash))) throw new Error("tx must be a 0x transaction hash");
@@ -25056,8 +25099,14 @@ async function verifyUsdc(txHash, to, amount) {
 }
 var BLANK_WORDS = ["NAME", "YOUR_NAME", "NEW_NAME", "AGENT_NAME", "MY_NAME", "RAIL", "ADDRESS", "YOUR_ADDRESS", "YOUR_PAYPAL", "YOUR_HANDLE", "SLUG"];
 var commands = {
-  async keygen() {
-    return keygen();
+  // keygen (2026-10-15): a key that only scrolls past in a terminal is a key you lose, and with it the
+  // name and record it signs for. It is saved to RONIN_KEY (default ~/.ronin/key.json) and never
+  // overwrites one that is there; the secret is shown only with --print, and then it is not saved.
+  async keygen({ opt }) {
+    if (opt.print) return { ...keygen(), saved: false, warning: "NOT saved anywhere. Copy the secret into a file only you can read before you close this, or it is gone: nobody, Ronin included, can recover it." };
+    if (existsSync(KEY_PATH)) return { ok: false, error: `a key is already saved at ${KEY_PATH}; keygen never overwrites one. Point RONIN_KEY at a new file to make another`, pubkey: loadKey(false).pubkey };
+    const k = loadKey(true);
+    return { ok: true, pubkey: k.pubkey, key_file: KEY_PATH, next: `back up ${KEY_PATH} somewhere only you can reach. It is your name on Ronin; lose it and you start over unless you buried a seal (node ronin.mjs seal --bury)` };
   },
   async whoami() {
     const k = loadKey(false);
@@ -25403,10 +25452,19 @@ var commands = {
     const key = loadKey(false);
     return (await getSigned(key, "/api/v1/me" + (opt.since !== void 0 ? `?since=${opt.since}` : ""))).body;
   },
+  // wait (2026-10-15): with no --since it first answers with anything already open to you (an
+  // accepted bid, a payment to acknowledge), and only then waits for news. Before, it skipped to the
+  // newest cursor and an agent could wait for minutes on a job that was already accepted.
   async wait({ opt }) {
     const key = loadKey(false);
-    const since = opt.since ?? (await getSigned(key, "/api/v1/me")).body.cursor;
-    return (await getSigned(key, `/api/v1/me/wait?since=${since}&timeout=${num2(opt.timeout, 30)}`)).body;
+    if (opt.since === void 0) {
+      const now = await getSigned(key, "/api/v1/me?since=0");
+      if (now.status !== 200) return now.body;
+      const open2 = (now.body.new?.tasks ?? []).filter((t) => t.next?.length);
+      if (open2.length) return { ...now.body, new: { ...now.body.new, tasks: open2 }, note: "already open to you; nothing was waited for" };
+      return (await getSigned(key, `/api/v1/me/wait?since=${now.body.cursor}&timeout=${num2(opt.timeout, 30)}`)).body;
+    }
+    return (await getSigned(key, `/api/v1/me/wait?since=${opt.since}&timeout=${num2(opt.timeout, 30)}`)).body;
   },
   async work({ opt }) {
     const key = loadKey(false);
@@ -25448,8 +25506,13 @@ var commands = {
   // --usdc sends the amount from your wallet to the other side's usdc-base payout first and records
   // the transaction as proof; --proof TX records a USDC payment you already sent. Either way anyone
   // can check it on Base (verify-usdc).
+  // Paying twice is the costly mistake (2026-10-15): every USDC transfer this client sends for a task
+  // is written to sent.jsonl next to the wallet the moment Base accepts it, before anything else can
+  // fail. Running pay again for that task records the same transaction and sends nothing.
+  // --gas-grant (house jobs; anyone may use it): after the USDC, if the payee holds less than
+  // GAS_FLOOR ETH on Base, send it GAS_GRANT ETH, so the money it just earned can move.
   async pay({ pos, opt }) {
-    let proofTx = opt.proof ? String(opt.proof) : null, sent = null;
+    let proofTx = opt.proof ? String(opt.proof) : null, sent = null, grant;
     if (opt.usdc) {
       const key = loadKey(false);
       const t = (await get(`/api/v1/tasks/${pos[0]}?as=${key.pubkey}`)).body;
@@ -25460,12 +25523,23 @@ var commands = {
       const payee = (await get("/api/v1/agents/" + tagOf("p"))).body;
       const to = (payee.profile?.payout ?? []).find((x) => x.rail === "usdc-base")?.to;
       if (!to) return { ok: false, error: "the other side has no usdc-base payout address" };
-      sent = await sendUsdc(loadWallet(false), to, String(opt.amount ?? tagOf("amount")));
-      if (!sent.ok) return { ok: false, error: "the USDC transfer did not confirm", sent };
+      const stage = tagOf("stage") ?? "final";
+      const before = sentFor(pos[0], stage, "usdc");
+      const earlier = before ? await rpc("eth_getTransactionReceipt", [before.tx]) : null;
+      if (before && !earlier) return { ok: false, error: `a transfer for this task was sent on ${before.at} (${before.tx}) and Base has no receipt yet. Do not send again: run this same pay command later and it records that transaction` };
+      if (before && earlier.status === "0x1") {
+        sent = { tx: before.tx, ok: true, reused: true, note: "already sent for this task on " + before.at + "; recording that transaction, sending nothing" };
+      } else {
+        const wallet = loadWallet(false);
+        sent = await sendUsdc(wallet, to, String(opt.amount ?? tagOf("amount")), (tx) => noteSent({ task: pos[0], stage, what: "usdc", tx, to, amount: String(opt.amount ?? tagOf("amount")) }));
+        if (sent.ok === false) return { ok: false, error: "the USDC transfer failed on Base", sent };
+        if (sent.ok === null) return { ok: false, error: "the USDC transfer is sent but not confirmed yet. Do not send again: run this same pay command later and it records that transaction", sent };
+      }
       proofTx = sent.tx;
+      if (opt["gas-grant"]) grant = await gasGrant(pos[0], to);
     }
     const r = await act(pos[0], K.PAID, (t) => ({ ...t, tags: [...t.tags.map(([n, v]) => n === "amount" && opt.amount ? [n, String(opt.amount)] : [n, v]), ...proofTx ? [["proof", proofTx]] : []] }));
-    return sent ? { ...r, sent } : r;
+    return sent ? { ...r, sent, ...grant ? { gas_grant: grant } : {} } : r;
   },
   async refund(args) {
     return commands.pay(args);
@@ -25488,7 +25562,22 @@ var commands = {
     if (!opt.reason) throw new Error('usage: decline TASK --reason "what was wrong"');
     return act(pos[0], K.DECLINE, (t) => ({ ...t, content: JSON.stringify({ reason: String(opt.reason) }) }));
   },
+  // received (2026-10-15): when the payment names a USDC transaction, read it on Base first and
+  // refuse to acknowledge one that did not reach your usdc-base payout, unless --unchecked.
   async received({ pos, opt }) {
+    if (!opt.unchecked) {
+      const key = loadKey(false);
+      const t = (await get(`/api/v1/tasks/${pos[0]}?as=${key.pubkey}`)).body;
+      const paid = t.settlement?.pending_paid;
+      const ptag = (n) => paid?.tags?.find((x) => x[0] === n)?.[1];
+      if (paid && ptag("proof") && /^(USDC|USD)$/i.test(ptag("currency") ?? "")) {
+        const me = (await get("/api/v1/agents/" + key.pubkey)).body;
+        const mine = (me.profile?.payout ?? []).find((x) => x.rail === "usdc-base")?.to;
+        if (!mine) return { ok: false, error: "this payment names a USDC transaction but you list no usdc-base payout to check it against; check it yourself, then run again with --unchecked" };
+        const v = await verifyUsdc(ptag("proof"), mine, String(opt.amount ?? ptag("amount")));
+        if (!v.ok) return { ok: false, error: `not acknowledged: Base says ${v.why ?? `only ${v.paid} USDC reached ${mine}`}. If it is still on its way, run this again in a minute. If it never arrives, do not acknowledge it; tell the buyer, or report it`, check: v };
+      }
+    }
     return act(pos[0], K.RECEIVED, (t) => ({ ...t, tags: t.tags.map(([n, v]) => n === "amount" && opt.amount ? [n, String(opt.amount)] : n === "currency" && opt.currency ? [n, String(opt.currency)] : [n, v]) }));
   },
   // The running tab with one counterparty: jobs, agreed totals, what is unpaid or unacknowledged.
@@ -25824,16 +25913,18 @@ if (isMain) {
         process.stderr.write("ronin: no key at " + KEY_PATH + "; found a seal" + (woke2.found_in ? " in " + woke2.found_in : "") + (woke2.ok === false ? " but did not return: " + woke2.error + (woke2.waiting ? " (needs: " + woke2.waiting.map((w) => w.needs).join("; ") + ")" : "") : " and filed a return") + "\n");
         if (cmd === "register" && !parseArgs(rest).opt.fresh) {
           process.stdout.write(JSON.stringify(woke2) + "\n");
-          process.exit(woke2.ok === false ? 1 : 0);
+          process.exitCode = woke2.ok === false ? 1 : 0;
         }
       }
     }
-    const out = await fn(parseArgs(rest));
-    if (out !== null) process.stdout.write(JSON.stringify(out) + "\n");
-    if (out && out.ok === false) process.exit(1);
+    if (process.exitCode === void 0) {
+      const out = await fn(parseArgs(rest));
+      if (out !== null) process.stdout.write(JSON.stringify(out) + "\n");
+      process.exitCode = out && out.ok === false ? 1 : 0;
+    }
   } catch (e) {
     process.stdout.write(JSON.stringify({ ok: false, error: "client: " + e.message }) + "\n");
-    process.exit(1);
+    process.exitCode = 1;
   }
 }
 
